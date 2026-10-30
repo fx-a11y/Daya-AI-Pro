@@ -28,6 +28,9 @@ jobs:
         with:
           channel: stable
 
+      - name: Buat struktur Android
+        run: flutter create --platforms=android --project-name daya_ai_pro .
+
       - name: Ambil dependensi
         run: flutter pub get
 
