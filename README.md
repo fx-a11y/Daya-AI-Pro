@@ -1,26 +1,13 @@
-# Daya AI Pro — API integration awal
+# Daya AI Pro v0.2.1 — API Free + emiten interaktif
 
-Flutter app untuk menghubungkan data BEI dari Api.co.id.
+Perubahan:
+- Daftar emiten di Beranda dan Screener sekarang bisa disentuh.
+- Menyentuh emiten membuka halaman Detail Emiten.
+- Detail Emiten otomatis meminta data candle harian dari Api.co.id dan menghitung EMA20, EMA50, RSI14, serta skor teknikal historis.
+- Paket Free tidak menyediakan candle intraday 5 menit/quote live; aplikasi tidak membuat sinyal scalping palsu.
+- API Key tetap dimasukkan dari menu Lainnya > Atur API Key dan disimpan menggunakan secure storage.
 
-## Fitur versi 0.2
-- Input API Key Api.co.id melalui menu **Lainnya**; disimpan memakai `flutter_secure_storage`.
-- Mengambil daftar instrumen dengan endpoint `/idx/v2/instruments?index=IHSG&limit=100`.
-- Screener daftar instrumen dan pencarian kode/nama; pengurutan perubahan harga penutupan harian.
-- Analisis EMA20, EMA50, RSI14 dari endpoint daily EOD untuk ticker yang diminta.
-- Feed berita pasar dari endpoint `/idx/v2/news`.
-- Error handling untuk key belum diatur, respons gagal, dan timeout.
+## Build
+Jalankan `flutter pub get`, lalu build Android APK melalui workflow GitHub Actions yang sudah ada di repository.
 
-## Batas paket Free
-Paket Free memiliki 500 hit/bulan. Endpoint daftar instrumen, daily EOD, dan berita tersedia. Quote live dan candle intraday (termasuk 5 menit) memerlukan paket Starter. Karena itu aplikasi ini **belum mengeluarkan sinyal scalping, Entry, TP, atau SL**. Analisis yang tersedia memakai candle harian dan hanya untuk riset/backtest awal.
-
-## Menjalankan
-1. `flutter pub get`
-2. `flutter run`
-3. Buka **Lainnya > Atur API Key**, tempel API Key Api.co.id.
-4. Buka Beranda lalu tekan **Uji koneksi & muat saham**.
-
-## Membuat APK
-`flutter build apk --release`
-
-## Keamanan
-Key disimpan di secure storage perangkat dan tidak ditulis di source code. Ini lebih baik daripada hardcode, tetapi bukan pengganti backend: untuk distribusi publik, pindahkan request API ke backend dan simpan key di environment server. Jangan unggah APK yang berisi key pribadi ke publik.
+Jika workflow membuat proyek Android dari nol, pastikan langkah `flutter create --platforms=android --project-name daya_ai_pro .` tetap dijalankan sebelum `flutter pub get`.
