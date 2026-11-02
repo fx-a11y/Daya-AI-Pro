@@ -174,6 +174,129 @@ class SectionTitle extends StatelessWidget{final String title,tag;const SectionT
 Widget _panel({required Widget child})=>Container(padding:const EdgeInsets.all(16),decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(17),border:Border.all(color:teal.withOpacity(.12))),child:child);
 Widget _statBox(String title,String value)=>Expanded(child:_panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(title,style:const TextStyle(color:muted,fontSize:10)),const SizedBox(height:6),Text(value,style:const TextStyle(fontWeight:FontWeight.w800,fontSize:13))])));
 class InfoBox extends StatelessWidget{final String text;const InfoBox(this.text,{super.key});@override Widget build(BuildContext context)=>Container(margin:const EdgeInsets.symmetric(vertical:7),padding:const EdgeInsets.all(12),decoration:BoxDecoration(color:amber.withOpacity(.07),borderRadius:BorderRadius.circular(12),border:Border.all(color:amber.withOpacity(.18))),child:Row(crossAxisAlignment:CrossAxisAlignment.start,children:[const Icon(Icons.info_outline,color:amber,size:18),const SizedBox(width:8),Expanded(child:Text(text,style:const TextStyle(color:Colors.white70,fontSize:11,height:1.45)))]));}
-class InstrumentTile extends StatelessWidget{final Map<String,dynamic> item;const InstrumentTile({super.key,required this.item});@override Widget build(BuildContext context){final ch=numVal(item['change_pct']);return Container(margin:const EdgeInsets.only(bottom:8),padding:const EdgeInsets.all(12),decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(13)),child:Row(children:[CircleAvatar(backgroundColor:teal.withOpacity(.12),child:Text((item['symbol']??'?').toString().substring(0,1),style:const TextStyle(color:teal))),const SizedBox(width:10),Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text((item['symbol']??'—').toString(),style:const TextStyle(fontWeight:FontWeight.w800)),Text((item['name']??'').toString(),maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(color:muted,fontSize:10))])),Column(crossAxisAlignment:CrossAxisAlignment.end,children:[Text(money(numVal(item['last'])),style:const TextStyle(fontWeight:FontWeight.w700,fontSize:12)),Text('${ch>=0?'+':''}${ch.toStringAsFixed(2)}%',style:TextStyle(color:ch>=0?green:red,fontSize:11,fontWeight:FontWeight.bold))]) ]));}}
+class InstrumentTile extends StatelessWidget {
+  final Map<String, dynamic> item;
+  const InstrumentTile({super.key, required this.item});
+
+  @override
+  Widget build(BuildContext context) {
+    final ch = numVal(item['change_pct']);
+    final symbol = (item['symbol'] ?? '').toString().toUpperCase();
+    final name = (item['name'] ?? symbol).toString();
+    return Material(
+      color: panel,
+      borderRadius: BorderRadius.circular(13),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(13),
+        onTap: symbol.isEmpty ? null : () {
+          Navigator.push(context, MaterialPageRoute(
+            builder: (_) => StockDetailPage(instrument: Map<String, dynamic>.from(item)),
+          ));
+        },
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 8),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(13),
+            border: Border.all(color: teal.withOpacity(.10)),
+          ),
+          child: Row(children: [
+            CircleAvatar(
+              backgroundColor: teal.withOpacity(.12),
+              child: Text(symbol.isEmpty ? '?' : symbol.substring(0, 1), style: const TextStyle(color: teal)),
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(symbol.isEmpty ? '—' : symbol, style: const TextStyle(fontWeight: FontWeight.w800)),
+              Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: muted, fontSize: 10)),
+            ])),
+            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              Text(money(numVal(item['last'])), style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
+              Text('${ch >= 0 ? '+' : ''}${ch.toStringAsFixed(2)}%', style: TextStyle(color: ch >= 0 ? green : red, fontSize: 11, fontWeight: FontWeight.bold)),
+            ]),
+            const SizedBox(width: 5),
+            const Icon(Icons.chevron_right, color: muted, size: 19),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+class StockDetailPage extends StatefulWidget {
+  final Map<String, dynamic> instrument;
+  const StockDetailPage({super.key, required this.instrument});
+
+  @override
+  State<StockDetailPage> createState() => _StockDetailPageState();
+}
+
+class _StockDetailPageState extends State<StockDetailPage> {
+  final api = ApiService();
+  bool loading = true;
+  String error = '';
+  StockAnalysis? analysis;
+
+  @override
+  void initState() {
+    super.initState();
+    loadAnalysis();
+  }
+
+  Future<void> loadAnalysis() async {
+    final symbol = (widget.instrument['symbol'] ?? '').toString().toUpperCase();
+    try {
+      final bars = await api.daily(symbol);
+      final result = analyzeDaily(widget.instrument, bars);
+      if (mounted) setState(() => analysis = result);
+    } catch (e) {
+      if (mounted) setState(() => error = e.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final symbol = (widget.instrument['symbol'] ?? '—').toString();
+    final name = (widget.instrument['name'] ?? symbol).toString();
+    return Scaffold(
+      appBar: AppBar(title: Text('$symbol • Detail Emiten')),
+      body: ListView(padding: const EdgeInsets.all(18), children: [
+        _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(symbol, style: const TextStyle(fontSize: 25, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 4),
+          Text(name, style: const TextStyle(color: muted)),
+          const SizedBox(height: 14),
+          const Text('Harga terakhir dari daftar instrumen', style: TextStyle(color: muted, fontSize: 11)),
+          const SizedBox(height: 4),
+          Text(money(numVal(widget.instrument['last'])), style: const TextStyle(fontSize: 23, fontWeight: FontWeight.w800)),
+          Text('Perubahan harian: ${numVal(widget.instrument['change_pct']).toStringAsFixed(2)}%', style: const TextStyle(color: Colors.white70)),
+        ])),
+        const SizedBox(height: 14),
+        const SectionTitle('Analisis teknikal historis', 'DATA HARIAN'),
+        const SizedBox(height: 8),
+        if (loading) const Center(child: Padding(padding: EdgeInsets.all(24), child: CircularProgressIndicator())),
+        if (error.isNotEmpty) InfoBox(error),
+        if (!loading && analysis != null) _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Expanded(child: Text('Kesimpulan analisis', style: TextStyle(fontWeight: FontWeight.w800))),
+            Text(analysis!.signal, style: TextStyle(color: analysis!.signal == 'WATCHLIST KUAT' ? green : amber, fontWeight: FontWeight.w900)),
+          ]),
+          const SizedBox(height: 12),
+          Text('Skor teknikal: ${analysis!.score.toStringAsFixed(0)}/100'),
+          Text('RSI 14: ${analysis!.rsi.toStringAsFixed(1)}'),
+          Text('EMA20: ${money(analysis!.ema20)}'),
+          Text('EMA50: ${money(analysis!.ema50)}'),
+          Text('Candle harian: ${analysis!.bars}'),
+          const Divider(color: panel2),
+          Text(analysis!.reason, style: const TextStyle(color: Colors.white70, height: 1.5)),
+        ])),
+        const SizedBox(height: 12),
+        const InfoBox('Analisis ini memakai data historis harian dari paket Free, bukan harga real-time atau sinyal scalping 5 menit. Ini bukan rekomendasi beli/jual.'),
+      ]),
+    );
+  }
+}
 class MenuRow extends StatelessWidget{final IconData icon;final String title,subtitle;const MenuRow({super.key,required this.icon,required this.title,required this.subtitle});@override Widget build(BuildContext context)=>Container(decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(14)),child:ListTile(leading:const Icon(Icons.info_outline,color:teal),title:Text(title,style:const TextStyle(fontWeight:FontWeight.w700,fontSize:13)),subtitle:Text(subtitle,style:const TextStyle(color:muted,fontSize:11))));}
 String money(double v)=>v==0?'—':'Rp ${v.toStringAsFixed(0)}';
