@@ -26,6 +26,9 @@ class ApiService {
   Future<String?> getKey() => _storage.read(key: 'api_co_id_key');
   Future<void> saveKey(String key) => _storage.write(key: 'api_co_id_key', value: key.trim());
   Future<void> clearKey() => _storage.delete(key: 'api_co_id_key');
+  Future<String?> getAiKey() => _storage.read(key: 'gemini_api_key');
+  Future<void> saveAiKey(String key) => _storage.write(key: 'gemini_api_key', value: key.trim());
+  Future<void> clearAiKey() => _storage.delete(key: 'gemini_api_key');
 
   Future<Map<String, dynamic>> get(String path, {Map<String, String>? query}) async {
     final key = await getKey();
@@ -71,11 +74,13 @@ class ApiService {
 
 class StockAnalysis {
   final String symbol, name, signal, reason;
-  final double close, changePct, score, rsi, ema20, ema50;
+  final double close, changePct, score, rsi, ema20, ema50, ema200, atr, entry, tp1, tp2, tp3, sl, rr1, rr2, rr3;
+  final String trendReason, momentumReason, riskReason;
   final int bars;
   StockAnalysis({required this.symbol, required this.name, required this.signal, required this.reason,
     required this.close, required this.changePct, required this.score, required this.rsi,
-    required this.ema20, required this.ema50, required this.bars});
+    required this.ema20, required this.ema50, required this.ema200, required this.atr,
+    required this.entry, required this.tp1, required this.tp2, required this.tp3, required this.sl, required this.rr1, required this.rr2, required this.rr3, required this.trendReason, required this.momentumReason, required this.riskReason, required this.bars});
 }
 
 double numVal(dynamic value) => double.tryParse((value ?? '').toString().replaceAll(',', '')) ?? 0;
@@ -99,20 +104,91 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
   final closes = bars.map((e) => numVal(e['close'])).where((v) => v > 0).toList();
   final close = closes.isEmpty ? numVal(instrument['last']) : closes.last;
   final change = numVal(instrument['change_pct']);
-  final e20 = ema(closes,20), e50 = ema(closes,50), strength = rsi(closes);
+  final e20 = ema(closes,20), e50 = ema(closes,50), e200 = ema(closes,200), strength = rsi(closes);
+  double atr = 0;
+  if (bars.length >= 15) {
+    final trs = <double>[];
+    for (int i = bars.length - 14; i < bars.length; i++) {
+      final high = numVal(bars[i]['high']), low = numVal(bars[i]['low']);
+      final prev = numVal(bars[i-1]['close']);
+      if (high > 0 && low > 0 && prev > 0) {
+        trs.add([high-low, (high-prev).abs(), (low-prev).abs()].reduce((a,b)=>a>b?a:b));
+      }
+    }
+    if (trs.isNotEmpty) atr = trs.reduce((a,b)=>a+b)/trs.length;
+  }
   double score = 0;
-  if (e20 > 0 && close > e20) score += 25;
-  if (e50 > 0 && e20 > e50) score += 25;
-  if (strength >= 50 && strength <= 70) score += 20;
-  if (change > 0) score += 15;
-  if (bars.length >= 50) score += 15;
-  final valid = bars.length >= 50 && e20 > 0 && e50 > 0;
-  final signal = !valid ? 'DATA KURANG' : (score >= 70 ? 'WATCHLIST KUAT' : 'WAIT');
-  final reason = !valid ? 'Butuh minimal 50 candle harian. Ini belum cukup untuk sinyal scalping.' :
-    'Analisis candle harian: ${close > e20 ? 'harga di atas EMA20' : 'harga di bawah EMA20'}, ${e20 > e50 ? 'EMA20 di atas EMA50' : 'EMA20 belum di atas EMA50'}, RSI ${strength.toStringAsFixed(1)}.';
+  if (e20 > 0 && close > e20) score += 20;
+  if (e50 > 0 && e20 > e50) score += 20;
+  if (e200 > 0 && close > e200) score += 20;
+  if (strength >= 50 && strength <= 68) score += 15;
+  if (strength > 68 && strength <= 75) score += 8;
+  if (change > 0) score += 10;
+  if (bars.length >= 200) score += 15; else if (bars.length >= 50) score += 8;
+  final valid = bars.length >= 50 && close > 0 && atr > 0;
+  // These are planning levels from the last daily close, not live executable orders.
+  final entry = valid ? close : 0;
+  final sl = valid ? close - (1.5 * atr) : 0;
+  final tp1 = valid ? close + (1.5 * atr) : 0;
+  final tp2 = valid ? close + (2.25 * atr) : 0;
+  final tp3 = valid ? close + (3.0 * atr) : 0;
+  final rr1 = valid ? (tp1-entry)/(entry-sl) : 0;
+  final rr2 = valid ? (tp2-entry)/(entry-sl) : 0;
+  final rr3 = valid ? (tp3-entry)/(entry-sl) : 0;
+  final trendReason = e20 > 0 && e50 > 0 && e200 > 0
+      ? (close > e20 && e20 > e50 && e50 > e200
+          ? 'Tren naik tersusun: harga > EMA20 > EMA50 > EMA200.'
+          : 'Susunan tren belum ideal: ${close > e20 ? 'harga di atas EMA20' : 'harga di bawah EMA20'}, ${e20 > e50 ? 'EMA20 di atas EMA50' : 'EMA20 di bawah/menyentuh EMA50'}, ${e50 > e200 ? 'EMA50 di atas EMA200' : 'EMA50 belum di atas EMA200'}.')
+      : 'Data belum cukup untuk membaca seluruh EMA20/50/200.';
+  final momentumReason = strength >= 50 && strength <= 68
+      ? 'RSI14 ${strength.toStringAsFixed(1)} berada pada area momentum positif yang relatif belum terlalu panas.'
+      : strength > 68
+          ? 'RSI14 ${strength.toStringAsFixed(1)} menunjukkan momentum kuat tetapi mulai rawan jenuh beli.'
+          : 'RSI14 ${strength.toStringAsFixed(1)} belum menunjukkan momentum bullish yang kuat.';
+  final riskReason = valid
+      ? 'ATR14 ${atr.toStringAsFixed(2)} dipakai untuk membuat level risiko. Stop referensi 1,5 ATR; target bertahap 1,5 / 2,25 / 3 ATR. Risiko rencana per transaksi 1% dan batas rugi harian 2% adalah parameter panduan, bukan pemantauan saldo otomatis.'
+      : 'Belum ada cukup data untuk menghitung ATR dan level risiko secara wajar.';
+  final signal = !valid ? 'DATA KURANG' : (score >= 70 && close > e20 && e20 > e50 && strength >= 50 && strength <= 75 ? 'SETUP POTENSIAL' : 'WAIT');
+  final reason = !valid ? 'Riwayat candle harian belum cukup untuk analisis swing yang layak.' : '$trendReason $momentumReason';
   return StockAnalysis(symbol: (instrument['symbol'] ?? '').toString(), name: (instrument['name'] ?? '').toString(),
     signal: signal, reason: reason, close: close, changePct: change, score: score, rsi: strength,
-    ema20: e20, ema50: e50, bars: closes.length);
+    ema20: e20, ema50: e50, ema200: e200, atr: atr, entry: entry, tp1: tp1, tp2: tp2, tp3: tp3, sl: sl,
+    rr1: rr1, rr2: rr2, rr3: rr3, trendReason: trendReason, momentumReason: momentumReason, riskReason: riskReason, bars: closes.length);
+}
+
+class GeminiService {
+  static const _storage = FlutterSecureStorage();
+  Future<String?> getKey() => _storage.read(key: 'gemini_api_key');
+  Future<void> saveKey(String key) => _storage.write(key: 'gemini_api_key', value: key.trim());
+  Future<void> clearKey() => _storage.delete(key: 'gemini_api_key');
+
+  Future<String> summarize(List<StockAnalysis> candidates) async {
+    final key = await getKey();
+    if (key == null || key.isEmpty) throw Exception('Gemini API Key belum diatur. Buka Lainnya > API AI.');
+    final payload = candidates.map((s) => {
+      'ticker': s.symbol, 'score': s.score.round(), 'close': s.close,
+      'rsi14': double.parse(s.rsi.toStringAsFixed(1)), 'ema20': s.ema20,
+      'ema50': s.ema50, 'ema200': s.ema200, 'atr14': s.atr,
+      'entry_reference': s.entry, 'stop_reference': s.sl,
+      'target1_reference': s.tp1, 'target2_reference': s.tp2, 'target3_reference': s.tp3,
+      'stop_distance': s.entry - s.sl, 'rr_tp1': s.rr1, 'rr_tp2': s.rr2, 'rr_tp3': s.rr3,
+      'reason': s.reason, 'trend_reason': s.trendReason, 'momentum_reason': s.momentumReason, 'risk_reason': s.riskReason,
+      'technical_status': s.signal, 'bars': s.bars,
+    }).toList();
+    final uri = Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent');
+    final response = await http.post(uri, headers: {'Content-Type':'application/json','x-goog-api-key':key}, body: jsonEncode({
+      'contents':[{'parts':[{'text':'Kamu adalah analis teknikal saham BEI untuk mode SWING. Untuk SETIAP saham, jelaskan secara terstruktur: (1) keputusan SETUP POTENSIAL/WAIT/DATA KURANG, (2) alasan tren berdasarkan posisi harga terhadap EMA20/50/200, (3) alasan momentum berdasarkan RSI14, (4) level entry referensi dari penutupan terakhir, (5) TP1, TP2, TP3, (6) stop loss, (7) rasio risk/reward tiap target, (8) risiko dan kondisi yang membatalkan skenario. Jangan pernah mengarang data, indikator, berita, fundamental, volume, atau harga yang tidak disediakan. Jika metrik tidak tersedia, tulis tidak tersedia. Jangan menyebut BUY pasti. Entry/TP/SL hanyalah level perencanaan berbasis candle harian dan ATR, bukan harga real-time. Money management tanpa input modal: panduan risiko 1% per transaksi, batas rugi harian 2%, maksimal 3 posisi bersamaan. Break-even dipertimbangkan setelah TP1; trailing stop mengikuti swing low harian atau ATR. Jelaskan bahwa aplikasi belum memantau saldo/posisi broker sehingga batas ini harus diterapkan manual. Sertakan alasan mengapa kandidat layak atau tidak layak dipantau. Data: ${jsonEncode(payload)}'}]}],
+      'generationConfig': {'temperature':0.2, 'maxOutputTokens':3500}
+    })).timeout(const Duration(seconds:35));
+    final body = jsonDecode(response.body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final msg = body is Map ? (body['error']?['message'] ?? 'Permintaan Gemini gagal') : 'Permintaan Gemini gagal';
+      throw Exception(msg.toString());
+    }
+    final text = body['candidates']?[0]?['content']?['parts']?[0]?['text'];
+    if (text == null) throw Exception('Gemini tidak mengembalikan ringkasan.');
+    return text.toString();
+  }
 }
 
 class MainShell extends StatefulWidget { const MainShell({super.key}); @override State<MainShell> createState()=>_MainShellState(); }
@@ -143,14 +219,90 @@ class _DashboardPageState extends State<DashboardPage> {
 
 class ScreenerPage extends StatefulWidget { const ScreenerPage({super.key}); @override State<ScreenerPage> createState()=>_ScreenerPageState(); }
 class _ScreenerPageState extends State<ScreenerPage> {
-  final api=ApiService(); final search=TextEditingController(); bool loading=false; String error=''; List<Map<String,dynamic>> all=[];
-  Future<void> scan() async { setState(()=>{loading=true,error=''}); try { final rows=await api.instruments(); setState(()=>all=rows); } catch(e){setState(()=>error=e.toString().replaceFirst('Exception: ',''));} finally {if(mounted)setState(()=>loading=false);} }
+  final api=ApiService(); final ai=GeminiService(); final search=TextEditingController();
+  bool loading=false, aiLoading=false; String error='', aiSummary='';
+  List<Map<String,dynamic>> all=[]; List<StockAnalysis> ranked=[]; int scanned=0; int total=0;
+  static const int scanLimit=18; // preserve monthly free-tier request budget
+
+  Future<void> scanSwing() async {
+    setState(()=>{loading=true,error='',aiSummary='',ranked=[]});
+    try {
+      final instruments=await api.instruments();
+      final eligible=instruments.where((e) {
+        final symbol=(e['symbol']??'').toString().toUpperCase();
+        final board=(e['board']??'').toString().toLowerCase();
+        final type=(e['type']??e['instrument_type']??'').toString().toLowerCase();
+        return RegExp(r'^[A-Z]{4}$').hasMatch(symbol) && !board.contains('etf') && !type.contains('warrant') && !type.contains('right');
+      }).toList();
+      all=eligible; total=eligible.length;
+      // Free tier: do not pretend we can request daily candles for every IDX issuer.
+      final ordered=[...eligible]..sort((a,b)=>numVal(b['change_pct']).compareTo(numVal(a['change_pct'])));
+      final batch=ordered.take(scanLimit).toList();
+      final found=<StockAnalysis>[]; int done=0;
+      for (final instrument in batch) {
+        try {
+          final symbol=(instrument['symbol']??'').toString();
+          final bars=await api.daily(symbol);
+          final analysis=analyzeDaily(instrument,bars);
+          if (analysis.bars >= 50) found.add(analysis);
+        } catch (_) { /* one symbol may lack history; continue with the next */ }
+        done++;
+        if (mounted) setState(()=>scanned=done);
+      }
+      found.sort((a,b)=>b.score.compareTo(a.score));
+      if (mounted) setState(()=>ranked=found.take(10).toList());
+      if (found.isEmpty) error='Data harian belum berhasil diambil untuk batch ini. Periksa API Key, endpoint, dan kuota.';
+    } catch(e) { error=e.toString().replaceFirst('Exception: ',''); }
+    finally { if(mounted)setState(()=>loading=false); }
+  }
+
+  Future<void> askAi() async {
+    if (ranked.isEmpty) return;
+    setState(()=>aiLoading=true);
+    try { final summary=await ai.summarize(ranked); if(mounted)setState(()=>aiSummary=summary); }
+    catch(e){if(mounted)setState(()=>aiSummary=e.toString().replaceFirst('Exception: ',''));}
+    finally{if(mounted)setState(()=>aiLoading=false);}
+  }
   @override void dispose(){search.dispose();super.dispose();}
-  @override Widget build(BuildContext context){final q=search.text.toUpperCase(); final rows=all.where((e)=>(e['symbol']??'').toString().contains(q)||(e['name']??'').toString().toUpperCase().contains(q)).toList()..sort((a,b)=>numVal(b['change_pct']).compareTo(numVal(a['change_pct'])));
-    return ListView(padding:const EdgeInsets.all(18),children:[const PageTitle(title:'AI Screener',subtitle:'Daftar instrumen BEI dari endpoint gratis Api.co.id'),const SizedBox(height:14),TextField(controller:search,onChanged:(_)=>setState((){}),decoration:const InputDecoration(prefixIcon:Icon(Icons.search),hintText:'Cari kode atau nama saham',filled:true,fillColor:panel,border:OutlineInputBorder(borderSide:BorderSide.none))),const SizedBox(height:12),FilledButton.icon(onPressed:loading?null:scan,icon:const Icon(Icons.manage_search),label:Text(loading?'Memuat...':'Ambil daftar saham BEI')),
-      if(error.isNotEmpty) InfoBox(error),if(all.isNotEmpty) Padding(padding:const EdgeInsets.symmetric(vertical:10),child:Text('${rows.length} saham ditampilkan dari ${all.length} instrumen yang diterima. Urutan berdasarkan perubahan penutupan harian, bukan sinyal scalping.',style:const TextStyle(color:muted,fontSize:11))),
-      if(all.isEmpty) const InfoBox('Belum ada hasil. Pemindaian ini memakai satu request daftar instrumen dan belum menghitung sinyal teknikal.'),...rows.map((e)=>InstrumentTile(item:e)),]);}
+  @override Widget build(BuildContext context) {
+    final q=search.text.toUpperCase();
+    final rows=all.where((e)=>(e['symbol']??'').toString().contains(q)||(e['name']??'').toString().toUpperCase().contains(q)).toList();
+    return ListView(padding:const EdgeInsets.all(18),children:[
+      const PageTitle(title:'AI Screener • Swing',subtitle:'Pemindaian kandidat berdasarkan candle harian BEI'),
+      const SizedBox(height:12),
+      _panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+        const Row(children:[Icon(Icons.calendar_month,color:teal),SizedBox(width:8),Text('MODE SWING TRADING',style:TextStyle(fontWeight:FontWeight.w900,letterSpacing:.6))]),
+        const SizedBox(height:8),const Text('Timeframe: 1D • Horizon: beberapa hari hingga beberapa minggu',style:TextStyle(color:muted,fontSize:11)),
+        const SizedBox(height:12),SizedBox(width:double.infinity,child:FilledButton.icon(onPressed:loading?null:scanSwing,icon:loading?const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2)):const Icon(Icons.radar),label:Text(loading?'Memindai $scanned/$scanLimit saham...':'Pindai kandidat swing'))),
+        const SizedBox(height:6),const Text('Indikator: EMA20/50/200, RSI14, ATR14. Ranking dihitung dari data teknikal, bukan keputusan AI semata.',style:TextStyle(color:muted,fontSize:10,height:1.4)),
+      ])),
+      if(error.isNotEmpty) InfoBox(error),
+      if(loading) Padding(padding:const EdgeInsets.symmetric(vertical:8),child:LinearProgressIndicator(value:scanned/scanLimit,minHeight:5)),
+      if(ranked.isNotEmpty) ...[
+        const SizedBox(height:16),SectionTitle('Top ${ranked.length} kandidat swing','BATCH $scanned/$total'),
+        const SizedBox(height:8),
+        ...ranked.asMap().entries.map((entry){final a=entry.value;return _panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+          Row(children:[CircleAvatar(backgroundColor:teal.withOpacity(.12),child:Text('${entry.key+1}',style:const TextStyle(color:teal,fontWeight:FontWeight.w900))),const SizedBox(width:10),Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('${a.symbol} • ${a.name}',style:const TextStyle(fontWeight:FontWeight.w900)),Text('Skor ${a.score.toStringAsFixed(0)}/100 • RSI ${a.rsi.toStringAsFixed(1)}',style:const TextStyle(color:muted,fontSize:10))])),Text(a.signal,style:TextStyle(color:a.signal=='SETUP POTENSIAL'?green:amber,fontWeight:FontWeight.w900,fontSize:10))]),
+          const Divider(color:panel2),
+          Wrap(spacing:12,runSpacing:8,children:[_metric('Entry acuan',a.entry),_metric('Stop Loss',a.sl),_metric('TP1',a.tp1),_metric('TP2',a.tp2),_metric('TP3',a.tp3),_metric('ATR14',a.atr)]),
+          const SizedBox(height:8),Text('Alasan tren: ${a.trendReason}',style:const TextStyle(color:Colors.white70,fontSize:11,height:1.4)),
+          const SizedBox(height:4),Text('Alasan momentum: ${a.momentumReason}',style:const TextStyle(color:Colors.white70,fontSize:11,height:1.4)),
+          const SizedBox(height:6),Text('Risk/Reward: TP1 1:${a.rr1.toStringAsFixed(2)} • TP2 1:${a.rr2.toStringAsFixed(2)} • TP3 1:${a.rr3.toStringAsFixed(2)}',style:const TextStyle(color:teal,fontSize:10,fontWeight:FontWeight.w800)),
+        ]));}),
+        const SizedBox(height:8),const InfoBox('Money Management tanpa input modal: panduan risiko 1% per transaksi, batas rugi harian 2%, maksimal 3 posisi bersamaan. Break-even: pertimbangkan memindahkan SL ke entry setelah harga mencapai TP1; trailing stop: ikuti swing low harian/ATR setelah TP1. Aplikasi belum terhubung ke broker sehingga tidak menghitung saldo, lot, atau memaksa batas risiko secara otomatis. Terapkan batas ini secara manual.'),
+        FilledButton.icon(onPressed:aiLoading?null:askAi,icon:const Icon(Icons.auto_awesome),label:Text(aiLoading?'AI sedang menganalisis...':'Minta ringkasan AI Gemini')),
+        if(aiSummary.isNotEmpty)_panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('RINGKASAN AI',style:TextStyle(color:teal,fontWeight:FontWeight.w900)),const SizedBox(height:8),Text(aiSummary,style:const TextStyle(height:1.5,color:Colors.white70))])),
+      ],
+      const SizedBox(height:16),const InfoBox('Batas penting paket Free: 500 hit/bulan. Satu pemindaian ini memakai sekitar 1 hit daftar instrumen + maksimal 18 hit riwayat harian. Jadi aplikasi belum dapat mengambil candle harian semua emiten BEI setiap hari. Hasil ini adalah batch kandidat, bukan pemindaian penuh seluruh bursa.'),
+      const InfoBox('Entry/TP/SL adalah level referensi berbasis ATR dari penutupan harian, bukan order real-time. Periksa likuiditas, spread, berita, dan risiko sebelum transaksi.'),
+      const SizedBox(height:16),const SectionTitle('Daftar emiten yang tersedia','API'),
+      TextField(controller:search,onChanged:(_)=>setState((){}),decoration:const InputDecoration(prefixIcon:Icon(Icons.search),hintText:'Cari kode atau nama saham',filled:true,fillColor:panel,border:OutlineInputBorder(borderSide:BorderSide.none))),
+      if(all.isEmpty)const InfoBox('Tekan Pindai kandidat swing untuk memuat daftar instrumen.'),
+      ...rows.take(60).map((e)=>InstrumentTile(item:e)),
+    ]);
+  }
 }
+Widget _metric(String label,double value)=>SizedBox(width:105,child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(label,style:const TextStyle(color:muted,fontSize:9)),const SizedBox(height:3),Text(money(value),style:const TextStyle(fontSize:11,fontWeight:FontWeight.w800))]));
 
 class AnalysisPage extends StatefulWidget { const AnalysisPage({super.key}); @override State<AnalysisPage> createState()=>_AnalysisPageState(); }
 class _AnalysisPageState extends State<AnalysisPage>{final api=ApiService();final ctrl=TextEditingController();bool loading=false;StockAnalysis? result;String error='';
@@ -164,9 +316,27 @@ class _AlertsPageState extends State<AlertsPage>{final api=ApiService();bool loa
  @override Widget build(BuildContext context)=>ListView(padding:const EdgeInsets.all(18),children:[const PageTitle(title:'Berita & Alert',subtitle:'Feed berita pasar dari Api.co.id'),const SizedBox(height:14),FilledButton.icon(onPressed:loading?null:load,icon:const Icon(Icons.refresh),label:Text(loading?'Memuat berita...':'Muat berita pasar')),if(error.isNotEmpty)InfoBox(error),if(rows.isEmpty)const InfoBox('Belum ada berita dimuat. Endpoint berita tersedia di paket Free.'),...rows.map((e)=>_panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text((e['title']??e['headline']??'Berita pasar').toString(),style:const TextStyle(fontWeight:FontWeight.w800)),const SizedBox(height:6),Text((e['summary']??e['description']??e['source']??'').toString(),style:const TextStyle(color:Colors.white70,fontSize:12)),const SizedBox(height:5),Text((e['published_at']??e['date']??'').toString(),style:const TextStyle(color:muted,fontSize:10))])))]);}
 
 class MorePage extends StatefulWidget{const MorePage({super.key});@override State<MorePage> createState()=>_MorePageState();}
-class _MorePageState extends State<MorePage>{final api=ApiService();String status='Memeriksa status key...';@override void initState(){super.initState();check();}Future<void>check()async{final k=await api.getKey();if(mounted)setState(()=>status=k==null||k.isEmpty?'API Key belum disimpan':'API Key tersimpan di penyimpanan aman perangkat.');}
- Future<void>editKey()async{final c=TextEditingController(text:await api.getKey()??'');if(!mounted)return;final value=await showDialog<String>(context:context,builder:(ctx)=>AlertDialog(backgroundColor:panel,title:const Text('API Key Api.co.id'),content:TextField(controller:c,obscureText:true,autocorrect:false,decoration:const InputDecoration(hintText:'Tempel API Key di sini')),actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('Batal')),FilledButton(onPressed:()=>Navigator.pop(ctx,c.text.trim()),child:const Text('Simpan'))]));if(value!=null&&value.isNotEmpty){await api.saveKey(value);await check();if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('API Key disimpan di perangkat.')));}}
- @override Widget build(BuildContext context)=>ListView(padding:const EdgeInsets.all(18),children:[const PageTitle(title:'Lainnya',subtitle:'Pengaturan aplikasi dan koneksi data'),const SizedBox(height:18),_panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('SUMBER DATA',style:TextStyle(color:teal,fontWeight:FontWeight.w800,letterSpacing:1)),const SizedBox(height:8),Text(status,style:const TextStyle(color:Colors.white70)),const SizedBox(height:12),SizedBox(width:double.infinity,child:FilledButton.icon(onPressed:editKey,icon:const Icon(Icons.key),label:const Text('Atur API Key'))),TextButton.icon(onPressed:()async{await api.clearKey();await check();},icon:const Icon(Icons.delete_outline),label:const Text('Hapus API Key'))])),const SizedBox(height:12),const InfoBox('API Key disimpan memakai secure storage perangkat. Untuk aplikasi yang dibagikan ke publik, pindahkan pemanggilan API ke backend agar key tidak bisa diekstrak dari APK.'),const SizedBox(height:12),const InfoBox('Paket Free: 500 hit/bulan dan 30 request/menit. Endpoint daftar instrumen, daily EOD, berita, kalender, dan referensi tersedia. Quote live dan intraday 5 menit memerlukan Starter.'),const SizedBox(height:12),const MenuRow(icon:Icons.info_outline,title:'Tentang Daya AI Pro',subtitle:'Versi 0.2 • API integration awal')]);}
+class _MorePageState extends State<MorePage>{
+ final api=ApiService(); final ai=GeminiService(); String apiStatus='Memeriksa...'; String aiStatus='Memeriksa...';
+ @override void initState(){super.initState();check();}
+ Future<void>check()async{final k=await api.getKey();final a=await ai.getKey();if(mounted)setState(()=>{apiStatus:k==null||k.isEmpty?'API saham belum disimpan':'API saham tersimpan aman di perangkat.',aiStatus:a==null||a.isEmpty?'API AI Gemini belum disimpan':'API AI Gemini tersimpan aman di perangkat.'});}
+ Future<void>edit({required bool isAi})async{
+   final current=isAi?await ai.getKey():await api.getKey(); if(!mounted)return;
+   final c=TextEditingController(text:current??'');
+   final value=await showDialog<String>(context:context,builder:(ctx)=>AlertDialog(backgroundColor:panel,title:Text(isAi?'API Key AI • Gemini':'API Key Saham • Api.co.id'),content:TextField(controller:c,obscureText:true,autocorrect:false,decoration:InputDecoration(hintText:isAi?'Tempel Gemini API Key':'Tempel Api.co.id API Key')),actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('Batal')),FilledButton(onPressed:()=>Navigator.pop(ctx,c.text.trim()),child:const Text('Simpan'))]));
+   if(value!=null&&value.isNotEmpty){if(isAi)await ai.saveKey(value);else await api.saveKey(value);await check();if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('API Key disimpan secara lokal.')));}
+ }
+ @override Widget build(BuildContext context)=>ListView(padding:const EdgeInsets.all(18),children:[
+  const PageTitle(title:'Lainnya',subtitle:'Pengaturan koneksi data dan AI'),const SizedBox(height:18),
+  _panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('SUMBER DATA SAHAM',style:TextStyle(color:teal,fontWeight:FontWeight.w900,letterSpacing:1)),const SizedBox(height:8),Text(apiStatus,style:const TextStyle(color:Colors.white70)),const SizedBox(height:10),SizedBox(width:double.infinity,child:FilledButton.icon(onPressed:()=>edit(isAi:false),icon:const Icon(Icons.key),label:const Text('Atur API Key Api.co.id'))),TextButton.icon(onPressed:()async{await api.clearKey();await check();},icon:const Icon(Icons.delete_outline),label:const Text('Hapus API saham'))])),
+  const SizedBox(height:12),_panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('KECERDASAN BUATAN',style:TextStyle(color:teal,fontWeight:FontWeight.w900,letterSpacing:1)),const SizedBox(height:8),Text(aiStatus,style:const TextStyle(color:Colors.white70)),const SizedBox(height:10),SizedBox(width:double.infinity,child:FilledButton.icon(onPressed:()=>edit(isAi:true),icon:const Icon(Icons.auto_awesome),label:const Text('Atur API Key AI Gemini'))),TextButton.icon(onPressed:()async{await ai.clearKey();await check();},icon:const Icon(Icons.delete_outline),label:const Text('Hapus API AI'))])),
+  const SizedBox(height:12),const InfoBox('AI Gemini sekarang diminta menjelaskan keputusan per saham: tren EMA, momentum RSI, alasan entry, TP1–TP3, Stop Loss, Risk/Reward, risiko, dan kondisi pembatalan. AI tidak boleh mengarang data yang tidak tersedia.'),
+  const InfoBox('Money Management tanpa modal: panduan risiko 1% per transaksi, batas rugi harian 2%, maksimal 3 posisi. Break-even dapat dipertimbangkan setelah TP1; trailing stop mengikuti swing low/ATR. Ini parameter panduan manual; belum terhubung ke saldo broker atau eksekusi order.'),
+  const InfoBox('Keamanan: key disimpan di secure storage perangkat, tetapi key yang dipakai langsung dari APK masih dapat diekstrak oleh pihak yang menguasai perangkat. Untuk aplikasi publik, gunakan backend pribadi.'),
+  const InfoBox('Paket Api.co.id Free memiliki batas 500 hit/bulan. Karena setiap emiten membutuhkan request riwayat harian, pemindaian seluruh saham BEI setiap hari belum dapat dilakukan dengan paket ini.'),
+  const SizedBox(height:12),const MenuRow(icon:Icons.info_outline,title:'Tentang Daya AI Pro',subtitle:'Versi 0.3.1 • Swing + Gemini + MM tanpa modal')
+ ]);
+}
 
 class BrandHeader extends StatelessWidget{const BrandHeader({super.key});@override Widget build(BuildContext context)=>Row(children:[Container(width:42,height:42,decoration:BoxDecoration(color:teal.withOpacity(.14),borderRadius:BorderRadius.circular(13)),child:const Icon(Icons.show_chart,color:teal,size:28)),const SizedBox(width:10),const Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('Daya AI Pro',style:TextStyle(fontSize:21,fontWeight:FontWeight.w800)),Text('AI Analyst Saham Indonesia',style:TextStyle(color:muted,fontSize:12))]))]);}
 class PageTitle extends StatelessWidget{final String title,subtitle;const PageTitle({super.key,required this.title,required this.subtitle});@override Widget build(BuildContext context)=>Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(title,style:const TextStyle(fontSize:25,fontWeight:FontWeight.w900)),const SizedBox(height:5),Text(subtitle,style:const TextStyle(color:muted,fontSize:12))]);}
@@ -281,16 +451,31 @@ class _StockDetailPageState extends State<StockDetailPage> {
         if (!loading && analysis != null) _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
             const Expanded(child: Text('Kesimpulan analisis', style: TextStyle(fontWeight: FontWeight.w800))),
-            Text(analysis!.signal, style: TextStyle(color: analysis!.signal == 'WATCHLIST KUAT' ? green : amber, fontWeight: FontWeight.w900)),
+            Text(analysis!.signal, style: TextStyle(color: analysis!.signal == 'SETUP POTENSIAL' ? green : amber, fontWeight: FontWeight.w900)),
           ]),
           const SizedBox(height: 12),
           Text('Skor teknikal: ${analysis!.score.toStringAsFixed(0)}/100'),
           Text('RSI 14: ${analysis!.rsi.toStringAsFixed(1)}'),
           Text('EMA20: ${money(analysis!.ema20)}'),
           Text('EMA50: ${money(analysis!.ema50)}'),
+          Text('EMA200: ${money(analysis!.ema200)}'),
+          Text('ATR14: ${money(analysis!.atr)}'),
+          Text('Entry acuan: ${money(analysis!.entry)}'),
+          Text('Stop referensi: ${money(analysis!.sl)}'),
+          Text('TP1 / TP2 / TP3: ${money(analysis!.tp1)} / ${money(analysis!.tp2)} / ${money(analysis!.tp3)}'),
+          Text('Risk/Reward: 1:${analysis!.rr1.toStringAsFixed(2)} / 1:${analysis!.rr2.toStringAsFixed(2)} / 1:${analysis!.rr3.toStringAsFixed(2)}'),
           Text('Candle harian: ${analysis!.bars}'),
           const Divider(color: panel2),
-          Text(analysis!.reason, style: const TextStyle(color: Colors.white70, height: 1.5)),
+          Text('ALASAN TREN', style: const TextStyle(color: teal, fontWeight: FontWeight.w800)),
+          Text(analysis!.trendReason, style: const TextStyle(color: Colors.white70, height: 1.5)),
+          const SizedBox(height: 8),
+          Text('ALASAN MOMENTUM', style: const TextStyle(color: teal, fontWeight: FontWeight.w800)),
+          Text(analysis!.momentumReason, style: const TextStyle(color: Colors.white70, height: 1.5)),
+          const SizedBox(height: 8),
+          Text('MONEY MANAGEMENT', style: const TextStyle(color: teal, fontWeight: FontWeight.w800)),
+          Text(analysis!.riskReason, style: const TextStyle(color: Colors.white70, height: 1.5)),
+          const SizedBox(height: 6),
+          const Text('Panduan tanpa input modal: risiko 1% per transaksi, batas rugi harian 2%, maksimal 3 posisi. Pertimbangkan break-even setelah TP1 dan trailing stop mengikuti swing low/ATR. Aturan harus diterapkan manual; aplikasi tidak memantau saldo atau order broker.', style: TextStyle(color: Colors.white70, height: 1.5)),
         ])),
         const SizedBox(height: 12),
         const InfoBox('Analisis ini memakai data historis harian dari paket Free, bukan harga real-time atau sinyal scalping 5 menit. Ini bukan rekomendasi beli/jual.'),
