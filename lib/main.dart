@@ -127,14 +127,14 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
   if (bars.length >= 200) score += 15; else if (bars.length >= 50) score += 8;
   final valid = bars.length >= 50 && close > 0 && atr > 0;
   // These are planning levels from the last daily close, not live executable orders.
-  final entry = valid ? close : 0;
-  final sl = valid ? close - (1.5 * atr) : 0;
-  final tp1 = valid ? close + (1.5 * atr) : 0;
-  final tp2 = valid ? close + (2.25 * atr) : 0;
-  final tp3 = valid ? close + (3.0 * atr) : 0;
-  final rr1 = valid ? (tp1-entry)/(entry-sl) : 0;
-  final rr2 = valid ? (tp2-entry)/(entry-sl) : 0;
-  final rr3 = valid ? (tp3-entry)/(entry-sl) : 0;
+  final entry = valid ? close : 0.0;
+  final sl = valid ? close - (1.5 * atr) : 0.0;
+  final tp1 = valid ? close + (1.5 * atr) : 0.0;
+  final tp2 = valid ? close + (2.25 * atr) : 0.0;
+  final tp3 = valid ? close + (3.0 * atr) : 0.0;
+  final rr1 = valid ? (tp1-entry)/(entry-sl) : 0.0;
+  final rr2 = valid ? (tp2-entry)/(entry-sl) : 0.0;
+  final rr3 = valid ? (tp3-entry)/(entry-sl) : 0.0;
   final trendReason = e20 > 0 && e50 > 0 && e200 > 0
       ? (close > e20 && e20 > e50 && e50 > e200
           ? 'Tren naik tersusun: harga > EMA20 > EMA50 > EMA200.'
