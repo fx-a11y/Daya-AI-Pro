@@ -132,36 +132,78 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
   final tp1 = valid ? entry + (1.5 * atr) : 0.0;
   final tp2 = valid ? entry + (2.25 * atr) : 0.0;
   final tp3 = valid ? entry + (3.0 * atr) : 0.0;
+        final trendReason = valid
       ? (close > e20 && e20 > e50 && e50 > e200
           ? 'Tren naik tersusun: harga > EMA20 > EMA50 > EMA200.'
-          : 'Susunan tren belum ideal: ${close > e20 ? 'harga di atas EMA20' : 'harga di bawah EMA20'}, ${e20 > e50 ? 'EMA20 di atas EMA50' : 'EMA20 di bawah/menyentuh EMA50'}, ${e50 > e200 ? 'EMA50 di atas EMA200' : 'EMA50 belum di atas EMA200'}.')
+          : 'Susunan tren belum ideal: '
+              '${close > e20 ? 'harga di atas EMA20' : 'harga di bawah EMA20'}, '
+              '${e20 > e50 ? 'EMA20 di atas EMA50' : 'EMA20 di bawah EMA50'}, '
+              '${e50 > e200 ? 'EMA50 di atas EMA200' : 'EMA50 belum di atas EMA200'}.')
       : 'Data belum cukup untuk membaca seluruh EMA20/50/200.';
-  final momentumReason = strength >= 50 && strength <= 68
-      ? 'RSI14 ${strength.toStringAsFixed(1)} berada pada area momentum positif yang relatif belum terlalu panas.'
-      : strength > 68
-          ? 'RSI14 ${strength.toStringAsFixed(1)} menunjukkan momentum kuat tetapi mulai rawan jenuh beli.'
-          : 'RSI14 ${strength.toStringAsFixed(1)} belum menunjukkan momentum bullish yang kuat.';
-  final riskReason = valid
-      ? 'ATR14 ${atr.toStringAsFixed(2)} dipakai untuk membuat level risiko. Stop referensi 1,5 ATR; target bertahap 1,5 / 2,25 / 3 ATR. Risiko rencana per transaksi 1% dan batas rugi harian 2% adalah parameter panduan, bukan pemantauan saldo otomatis.'
-      : 'Belum ada cukup data untuk menghitung ATR dan level risiko secara wajar.';
-  final trendValid = valid &&
-    close > e20 &&
-    e20 > e50 &&
-    strength >= 50 &&
-    strength <= 75;
 
-final signal = !valid
-    ? 'DATA KURANG'
-    : !trendValid
-        ? 'WAIT'
-        : close <= entry * 1.02
-            ? 'AREA ENTRY'
-            : 'MENUNGGU PULLBACK';
-  final reason = !valid ? 'Riwayat candle harian belum cukup untuk analisis swing yang layak.' : '$trendReason $momentumReason';
-  return StockAnalysis(symbol: (instrument['symbol'] ?? '').toString(), name: (instrument['name'] ?? '').toString(),
-    signal: signal, reason: reason, close: close, changePct: change, score: score, rsi: strength,
-    ema20: e20, ema50: e50, ema200: e200, atr: atr, entry: entry, tp1: tp1, tp2: tp2, tp3: tp3, sl: sl,
-    rr1: rr1, rr2: rr2, rr3: rr3, trendReason: trendReason, momentumReason: momentumReason, riskReason: riskReason, bars: closes.length);
+  final momentumReason = strength >= 50 && strength <= 68
+      ? 'RSI14 ${strength.toStringAsFixed(1)} berada pada area momentum positif.'
+      : strength > 68
+          ? 'RSI14 ${strength.toStringAsFixed(1)} menunjukkan momentum kuat tetapi rawan jenuh beli.'
+          : 'RSI14 ${strength.toStringAsFixed(1)} belum menunjukkan momentum bullish yang kuat.';
+
+  final riskReason = valid
+      ? 'ATR14 ${atr.toStringAsFixed(2)} digunakan untuk menghitung stop loss dan target.'
+      : 'Data belum cukup untuk menghitung level risiko.';
+
+  final riskDistance = entry - sl;
+
+  final rr1 = valid && riskDistance > 0
+      ? (tp1 - entry) / riskDistance : 0.0;
+  final rr2 = valid && riskDistance > 0
+      ? (tp2 - entry) / riskDistance : 0.0;
+  final rr3 = valid && riskDistance > 0
+      ? (tp3 - entry) / riskDistance : 0.0;
+
+  final trendValid = valid &&
+      close > e20 &&
+      e20 > e50 &&
+      strength >= 50 &&
+      strength <= 75;
+
+  final signal = !valid
+      ? 'DATA KURANG'
+      : !trendValid
+          ? 'WAIT'
+          : close <= entry * 1.02
+              ? 'AREA ENTRY'
+              : 'MENUNGGU PULLBACK';
+
+  final reason = !valid
+      ? 'Riwayat candle harian belum cukup untuk analisis swing yang layak.'
+      : '$trendReason $momentumReason';
+
+  return StockAnalysis(
+    symbol: (instrument['symbol'] ?? '').toString(),
+    name: (instrument['name'] ?? '').toString(),
+    signal: signal,
+    reason: reason,
+    close: close,
+    changePct: change,
+    score: score,
+    rsi: strength,
+    ema20: e20,
+    ema50: e50,
+    ema200: e200,
+    atr: atr,
+    entry: entry,
+    tp1: tp1,
+    tp2: tp2,
+    tp3: tp3,
+    sl: sl,
+    rr1: rr1,
+    rr2: rr2,
+    rr3: rr3,
+    trendReason: trendReason,
+    momentumReason: momentumReason,
+    riskReason: riskReason,
+    bars: closes.length,
+  );
 }
 
 class GeminiService {
@@ -299,8 +341,6 @@ class _ScreenerPageState extends State<ScreenerPage> {
         FilledButton.icon(onPressed:aiLoading?null:askAi,icon:const Icon(Icons.auto_awesome),label:Text(aiLoading?'AI sedang menganalisis...':'Minta ringkasan AI Gemini')),
         if(aiSummary.isNotEmpty)_panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('RINGKASAN AI',style:TextStyle(color:teal,fontWeight:FontWeight.w900)),const SizedBox(height:8),Text(aiSummary,style:const TextStyle(height:1.5,color:Colors.white70))])),
       ],
-      const SizedBox(height:16),const InfoBox('Batas penting paket Free: 500 hit/bulan. Satu pemindaian ini memakai sekitar 1 hit daftar instrumen + maksimal 18 hit riwayat harian. Jadi aplikasi belum dapat mengambil candle harian semua emiten BEI setiap hari. Hasil ini adalah batch kandidat, bukan pemindaian penuh seluruh bursa.'),
-      const InfoBox('Entry/TP/SL adalah level referensi berbasis ATR dari penutupan harian, bukan order real-time. Periksa likuiditas, spread, berita, dan risiko sebelum transaksi.'),
       const SizedBox(height:16),const SectionTitle('Daftar emiten yang tersedia','API'),
       TextField(controller:search,onChanged:(_)=>setState((){}),decoration:const InputDecoration(prefixIcon:Icon(Icons.search),hintText:'Cari kode atau nama saham',filled:true,fillColor:panel,border:OutlineInputBorder(borderSide:BorderSide.none))),
       if(all.isEmpty)const InfoBox('Tekan Pindai kandidat swing untuk memuat daftar instrumen.'),
