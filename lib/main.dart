@@ -126,16 +126,12 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
   if (change > 0) score += 10;
   if (bars.length >= 200) score += 15; else if (bars.length >= 50) score += 8;
   final valid = bars.length >= 50 && close > 0 && atr > 0;
-  // These are planning levels from the last daily close, not live executable orders.
-  final entry = valid ? close : 0.0;
-  final sl = valid ? close - (1.5 * atr) : 0.0;
-  final tp1 = valid ? close + (1.5 * atr) : 0.0;
-  final tp2 = valid ? close + (2.25 * atr) : 0.0;
-  final tp3 = valid ? close + (3.0 * atr) : 0.0;
-  final rr1 = valid ? (tp1-entry)/(entry-sl) : 0.0;
-  final rr2 = valid ? (tp2-entry)/(entry-sl) : 0.0;
-  final rr3 = valid ? (tp3-entry)/(entry-sl) : 0.0;
-  final trendReason = e20 > 0 && e50 > 0 && e200 > 0
+  // Entry acuan menggunakan EMA20 sebagai area rencana pullback.
+  final entry = valid && e20 > 0 ? e20 : 0.0;
+  final sl = valid ? entry - (1.5 * atr) : 0.0;
+  final tp1 = valid ? entry + (1.5 * atr) : 0.0;
+  final tp2 = valid ? entry + (2.25 * atr) : 0.0;
+  final tp3 = valid ? entry + (3.0 * atr) : 0.0;
       ? (close > e20 && e20 > e50 && e50 > e200
           ? 'Tren naik tersusun: harga > EMA20 > EMA50 > EMA200.'
           : 'Susunan tren belum ideal: ${close > e20 ? 'harga di atas EMA20' : 'harga di bawah EMA20'}, ${e20 > e50 ? 'EMA20 di atas EMA50' : 'EMA20 di bawah/menyentuh EMA50'}, ${e50 > e200 ? 'EMA50 di atas EMA200' : 'EMA50 belum di atas EMA200'}.')
@@ -148,7 +144,19 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
   final riskReason = valid
       ? 'ATR14 ${atr.toStringAsFixed(2)} dipakai untuk membuat level risiko. Stop referensi 1,5 ATR; target bertahap 1,5 / 2,25 / 3 ATR. Risiko rencana per transaksi 1% dan batas rugi harian 2% adalah parameter panduan, bukan pemantauan saldo otomatis.'
       : 'Belum ada cukup data untuk menghitung ATR dan level risiko secara wajar.';
-  final signal = !valid ? 'DATA KURANG' : (score >= 70 && close > e20 && e20 > e50 && strength >= 50 && strength <= 75 ? 'SETUP POTENSIAL' : 'WAIT');
+  final trendValid = valid &&
+    close > e20 &&
+    e20 > e50 &&
+    strength >= 50 &&
+    strength <= 75;
+
+final signal = !valid
+    ? 'DATA KURANG'
+    : !trendValid
+        ? 'WAIT'
+        : close <= entry * 1.02
+            ? 'AREA ENTRY'
+            : 'MENUNGGU PULLBACK';
   final reason = !valid ? 'Riwayat candle harian belum cukup untuk analisis swing yang layak.' : '$trendReason $momentumReason';
   return StockAnalysis(symbol: (instrument['symbol'] ?? '').toString(), name: (instrument['name'] ?? '').toString(),
     signal: signal, reason: reason, close: close, changePct: change, score: score, rsi: strength,
@@ -281,14 +289,12 @@ class _ScreenerPageState extends State<ScreenerPage> {
       if(ranked.isNotEmpty) ...[
         const SizedBox(height:16),SectionTitle('Top ${ranked.length} kandidat swing','BATCH $scanned/$total'),
         const SizedBox(height:8),
-        ...ranked.asMap().entries.map((entry){final a=entry.value;return _panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-          Row(children:[CircleAvatar(backgroundColor:teal.withOpacity(.12),child:Text('${entry.key+1}',style:const TextStyle(color:teal,fontWeight:FontWeight.w900))),const SizedBox(width:10),Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('${a.symbol} • ${a.name}',style:const TextStyle(fontWeight:FontWeight.w900)),Text('Skor ${a.score.toStringAsFixed(0)}/100 • RSI ${a.rsi.toStringAsFixed(1)}',style:const TextStyle(color:muted,fontSize:10))])),Text(a.signal,style:TextStyle(color:a.signal=='SETUP POTENSIAL'?green:amber,fontWeight:FontWeight.w900,fontSize:10))]),
-          const Divider(color:panel2),
-          Wrap(spacing:12,runSpacing:8,children:[_metric('Entry acuan',a.entry),_metric('Stop Loss',a.sl),_metric('TP1',a.tp1),_metric('TP2',a.tp2),_metric('TP3',a.tp3),_metric('ATR14',a.atr)]),
-          const SizedBox(height:8),Text('Alasan tren: ${a.trendReason}',style:const TextStyle(color:Colors.white70,fontSize:11,height:1.4)),
-          const SizedBox(height:4),Text('Alasan momentum: ${a.momentumReason}',style:const TextStyle(color:Colors.white70,fontSize:11,height:1.4)),
-          const SizedBox(height:6),Text('Risk/Reward: TP1 1:${a.rr1.toStringAsFixed(2)} • TP2 1:${a.rr2.toStringAsFixed(2)} • TP3 1:${a.rr3.toStringAsFixed(2)}',style:const TextStyle(color:teal,fontSize:10,fontWeight:FontWeight.w800)),
-        ]));}),
+        ...ranked.asMap().entries.map(
+        (entry) => CandidateCard(
+        analysis: entry.value,
+        rank: entry.key + 1,
+        ),
+       ),
         const SizedBox(height:8),const InfoBox('Money Management tanpa input modal: panduan risiko 1% per transaksi, batas rugi harian 2%, maksimal 3 posisi bersamaan. Break-even: pertimbangkan memindahkan SL ke entry setelah harga mencapai TP1; trailing stop: ikuti swing low harian/ATR setelah TP1. Aplikasi belum terhubung ke broker sehingga tidak menghitung saldo, lot, atau memaksa batas risiko secara otomatis. Terapkan batas ini secara manual.'),
         FilledButton.icon(onPressed:aiLoading?null:askAi,icon:const Icon(Icons.auto_awesome),label:Text(aiLoading?'AI sedang menganalisis...':'Minta ringkasan AI Gemini')),
         if(aiSummary.isNotEmpty)_panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('RINGKASAN AI',style:TextStyle(color:teal,fontWeight:FontWeight.w900)),const SizedBox(height:8),Text(aiSummary,style:const TextStyle(height:1.5,color:Colors.white70))])),
@@ -300,6 +306,126 @@ class _ScreenerPageState extends State<ScreenerPage> {
       if(all.isEmpty)const InfoBox('Tekan Pindai kandidat swing untuk memuat daftar instrumen.'),
       ...rows.take(60).map((e)=>InstrumentTile(item:e)),
     ]);
+  }
+}
+
+class CandidateCard extends StatelessWidget {
+  final StockAnalysis analysis;
+  final int rank;
+
+  const CandidateCard({
+    super.key,
+    required this.analysis,
+    required this.rank,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final instrument = <String, dynamic>{
+      'symbol': analysis.symbol,
+      'name': analysis.name,
+      'last': analysis.close,
+      'change_pct': analysis.changePct,
+    };
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(17),
+        onTap: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => StockDetailPage(instrument: instrument),
+            ),
+          );
+        },
+        child: _panel(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  CircleAvatar(
+                    backgroundColor: teal.withOpacity(.12),
+                    child: Text(
+                      '$rank',
+                      style: const TextStyle(
+                        color: teal,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${analysis.symbol} • ${analysis.name}',
+                          style: const TextStyle(fontWeight: FontWeight.w900),
+                        ),
+                        Text(
+                          'Skor ${analysis.score.toStringAsFixed(0)}/100 • RSI ${analysis.rsi.toStringAsFixed(1)}',
+                          style: const TextStyle(color: muted, fontSize: 10),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Icon(Icons.chevron_right, color: muted),
+                ],
+              ),
+              const Divider(color: panel2),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                children: [
+                  _metric('Harga terakhir', analysis.close),
+                  _metric('Entry acuan', analysis.entry),
+                  _metric('Stop Loss', analysis.sl),
+                  _metric('TP1', analysis.tp1),
+                  _metric('TP2', analysis.tp2),
+                  _metric('TP3', analysis.tp3),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                analysis.signal,
+                style: const TextStyle(
+                  color: teal,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              Text(
+                'Alasan tren: ${analysis.trendReason}',
+                style: const TextStyle(color: Colors.white70, fontSize: 11),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Alasan momentum: ${analysis.momentumReason}',
+                style: const TextStyle(color: Colors.white70, fontSize: 11),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Risk/Reward: TP1 1:${analysis.rr1.toStringAsFixed(2)} • '
+                'TP2 1:${analysis.rr2.toStringAsFixed(2)} • '
+                'TP3 1:${analysis.rr3.toStringAsFixed(2)}',
+                style: const TextStyle(
+                  color: teal,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 5),
+              const Text(
+                'Sentuh untuk melihat detail emiten',
+                style: TextStyle(color: muted, fontSize: 10),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 Widget _metric(String label,double value)=>SizedBox(width:105,child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(label,style:const TextStyle(color:muted,fontSize:9)),const SizedBox(height:3),Text(money(value),style:const TextStyle(fontSize:11,fontWeight:FontWeight.w800))]));
