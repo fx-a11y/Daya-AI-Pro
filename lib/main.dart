@@ -72,6 +72,30 @@ class ApiService {
   }
 }
 
+
+class USMarketService {
+  // File ini diperbarui otomatis oleh GitHub Actions setelah sesi pasar AS.
+  static const dataUrl =
+      'https://raw.githubusercontent.com/fx-a11y/Daya-AI-Pro/main/data/us_stocks.json';
+
+  Future<List<Map<String, dynamic>>> stocks() async {
+    final response = await http.get(Uri.parse(dataUrl))
+        .timeout(const Duration(seconds: 30));
+    if (response.statusCode != 200) {
+      throw Exception('Data saham AS belum tersedia (HTTP ${response.statusCode}). '
+          'Jalankan workflow GitHub Actions terlebih dahulu.');
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map || decoded['stocks'] is! List) {
+      throw Exception('Format data saham AS tidak valid.');
+    }
+    return (decoded['stocks'] as List)
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+  }
+}
+
 class StockAnalysis {
   final String symbol, name, signal, reason;
   final double close, changePct, score, rsi, ema20, ema50, ema200, atr, entry, tp1, tp2, tp3, sl, rr1, rr2, rr3;
@@ -83,6 +107,12 @@ class StockAnalysis {
     required this.entry, required this.tp1, required this.tp2, required this.tp3, required this.sl, required this.rr1, required this.rr2, required this.rr3, required this.trendReason, required this.momentumReason, required this.riskReason, required this.bars});
 }
 
+String compactNum(double n) {
+  if (n >= 1000000000) return '${(n/1000000000).toStringAsFixed(1)}B';
+  if (n >= 1000000) return '${(n/1000000).toStringAsFixed(1)}M';
+  if (n >= 1000) return '${(n/1000).toStringAsFixed(1)}K';
+  return n.toStringAsFixed(0);
+}
 double numVal(dynamic value) => double.tryParse((value ?? '').toString().replaceAll(',', '')) ?? 0;
 double ema(List<double> values, int period) {
   if (values.length < period) return 0;
@@ -269,9 +299,9 @@ class _DashboardPageState extends State<DashboardPage> {
 
 class ScreenerPage extends StatefulWidget { const ScreenerPage({super.key}); @override State<ScreenerPage> createState()=>_ScreenerPageState(); }
 class _ScreenerPageState extends State<ScreenerPage> {
-  final api=ApiService(); final ai=GeminiService(); final search=TextEditingController();
+  final api=ApiService(); final ai=GeminiService(); final search=TextEditingController(); final usApi=USMarketService();
   bool loading=false, aiLoading=false; String error='', aiSummary='';
-  List<Map<String,dynamic>> all=[]; List<StockAnalysis> ranked=[]; int scanned=0; int total=0;
+  List<Map<String,dynamic>> all=[]; List<StockAnalysis> ranked=[]; List<Map<String,dynamic>> usStocks=[]; bool usLoading=false; String usError=''; int scanned=0; int total=0;
   static const int scanLimit=18; // preserve monthly free-tier request budget
 
   Future<void> scanSwing() async {
@@ -306,6 +336,19 @@ class _ScreenerPageState extends State<ScreenerPage> {
     finally { if(mounted)setState(()=>loading=false); }
   }
 
+  Future<void> loadUsStocks() async {
+    setState(() { usLoading=true; usError=''; });
+    try {
+      final rows=await usApi.stocks();
+      rows.sort((a,b)=>numVal(b['rvol']).compareTo(numVal(a['rvol'])));
+      if(mounted) setState(()=>usStocks=rows.take(100).toList());
+    } catch(e) {
+      if(mounted) setState(()=>usError=e.toString().replaceFirst('Exception: ',''));
+    } finally {
+      if(mounted) setState(()=>usLoading=false);
+    }
+  }
+
   Future<void> askAi() async {
     if (ranked.isEmpty) return;
     setState(()=>aiLoading=true);
@@ -325,6 +368,34 @@ class _ScreenerPageState extends State<ScreenerPage> {
         const SizedBox(height:8),const Text('Timeframe: 1D • Horizon: beberapa hari hingga beberapa minggu',style:TextStyle(color:muted,fontSize:11)),
         const SizedBox(height:12),SizedBox(width:double.infinity,child:FilledButton.icon(onPressed:loading?null:scanSwing,icon:loading?const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2)):const Icon(Icons.radar),label:Text(loading?'Memindai $scanned/$scanLimit saham...':'Pindai kandidat swing'))),
         const SizedBox(height:6),const Text('Indikator: EMA20/50/200, RSI14, ATR14. Ranking dihitung dari data teknikal, bukan keputusan AI semata.',style:TextStyle(color:muted,fontSize:10,height:1.4)),
+      ])),
+      const SizedBox(height:12),
+      _panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+        const Row(children:[Icon(Icons.public,color:teal),SizedBox(width:8),Text('PASAR AMERIKA SERIKAT',style:TextStyle(fontWeight:FontWeight.w900))]),
+        const SizedBox(height:7),
+        const Text('Universe saham AS dari Nasdaq/NYSE • harga penutupan • volume • rata-rata volume 20 hari • RVOL. Data diperbarui otomatis melalui GitHub Actions.',
+          style:TextStyle(color:muted,fontSize:11,height:1.4)),
+        const SizedBox(height:10),
+        SizedBox(width:double.infinity,child:OutlinedButton.icon(
+          onPressed:usLoading?null:loadUsStocks,
+          icon:usLoading?const SizedBox(width:15,height:15,child:CircularProgressIndicator(strokeWidth:2)):const Icon(Icons.sync),
+          label:Text(usLoading?'Memuat data saham AS...':'Muat screener saham AS'))),
+        if(usError.isNotEmpty) InfoBox(usError),
+        if(usStocks.isNotEmpty) ...[
+          Text('Top ${usStocks.length} berdasarkan RVOL',style:const TextStyle(color:teal,fontWeight:FontWeight.w800,fontSize:12)),
+          const SizedBox(height:6),
+          ...usStocks.take(25).map((s)=>_panel(child:Row(children:[
+            Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+              Text('${s['symbol']??''} • ${s['name']??''}',maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontWeight:FontWeight.w800)),
+              Text('Vol ${compactNum(numVal(s['volume']))} • Avg20 ${compactNum(numVal(s['avg_volume_20']))}',style:const TextStyle(color:muted,fontSize:10))
+            ])),
+            Column(crossAxisAlignment:CrossAxisAlignment.end,children:[
+              Text('RVOL ${numVal(s['rvol']).toStringAsFixed(2)}x',style:TextStyle(color:numVal(s['rvol'])>=1.5?green:amber,fontWeight:FontWeight.w900)),
+              Text('${numVal(s['change_pct'])>=0?'+':''}${numVal(s['change_pct']).toStringAsFixed(2)}%',style:TextStyle(color:numVal(s['change_pct'])>=0?green:red,fontSize:11))
+            ])
+          ]))),
+          if(usStocks.isNotEmpty) Text('Update: ${usStocks.first['updated_at']??'—'}',style:const TextStyle(color:muted,fontSize:9))
+        ]
       ])),
       if(error.isNotEmpty) InfoBox(error),
       if(loading) Padding(padding:const EdgeInsets.symmetric(vertical:8),child:LinearProgressIndicator(value:scanned/scanLimit,minHeight:5)),
