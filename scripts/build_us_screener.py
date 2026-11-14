@@ -92,6 +92,45 @@ def main():
                 avg20 = safe_num(frame["Volume"].iloc[-21:-1].mean())
                 if close <= 0 or avg20 <= 0: continue
                 rvol = volume / avg20
+                # Daily technical indicators for a short swing setup.
+                highs = frame["High"].astype(float)
+                lows = frame["Low"].astype(float)
+                closes = frame["Close"].astype(float)
+                prev_closes = closes.shift(1)
+                true_range = pd.concat([
+                    highs - lows,
+                    (highs - prev_closes).abs(),
+                    (lows - prev_closes).abs(),
+                ], axis=1).max(axis=1)
+                atr14 = safe_num(true_range.rolling(14).mean().iloc[-1])
+                ema20 = safe_num(closes.ewm(span=20, adjust=False).mean().iloc[-1])
+                ema50 = safe_num(closes.ewm(span=50, adjust=False).mean().iloc[-1])
+                delta = closes.diff()
+                gain = delta.clip(lower=0).rolling(14).mean()
+                loss = (-delta.clip(upper=0)).rolling(14).mean()
+                rs = gain / loss.replace(0, float("nan"))
+                rsi14 = safe_num((100 - (100 / (1 + rs))).iloc[-1])
+                if rsi14 == 0 and safe_num(loss.iloc[-1]) == 0 and safe_num(gain.iloc[-1]) > 0:
+                    rsi14 = 100.0
+
+                # Only publish an entry plan when trend, momentum and volatility data agree.
+                setup = "NO TRADE"
+                entry_low = entry_high = stop_loss = take_profit_1 = take_profit_2 = 0.0
+                if atr14 > 0 and ema20 > ema50 and close > ema20 and 48 <= rsi14 <= 68 and rvol >= 0.8:
+                    setup = "BUY SETUP"
+                    entry_low = max(0.01, close - 0.50 * atr14)
+                    entry_high = max(entry_low, close - 0.15 * atr14)
+                    entry_mid = (entry_low + entry_high) / 2
+                    stop_loss = max(0.01, entry_low - 1.20 * atr14)
+                    risk = max(0.01, entry_mid - stop_loss)
+                    take_profit_1 = entry_mid + 1.5 * risk
+                    take_profit_2 = entry_mid + 2.0 * risk
+                elif atr14 > 0 and ema20 > ema50 and close > ema20:
+                    setup = "WAIT"
+
+                last_session = pd.Timestamp(frame.index[-1]).date()
+                # Five weekday sessions; exchange holidays are not excluded in this approximation.
+                valid_until = (pd.Timestamp(last_session) + pd.offsets.BDay(5)).date().isoformat()
                 rows.append({
                     "symbol": sym,
                     "name": names.get(sym, sym),
@@ -100,6 +139,18 @@ def main():
                     "avg_volume_20": int(avg20),
                     "rvol": round(rvol, 3),
                     "change_pct": round(((close / prev) - 1) * 100, 3) if prev > 0 else 0,
+                    "ema20": round(ema20, 4),
+                    "ema50": round(ema50, 4),
+                    "rsi14": round(rsi14, 2),
+                    "atr14": round(atr14, 4),
+                    "setup": setup,
+                    "entry_low": round(entry_low, 4) if entry_low else None,
+                    "entry_high": round(entry_high, 4) if entry_high else None,
+                    "stop_loss": round(stop_loss, 4) if stop_loss else None,
+                    "take_profit_1": round(take_profit_1, 4) if take_profit_1 else None,
+                    "take_profit_2": round(take_profit_2, 4) if take_profit_2 else None,
+                    "valid_until": valid_until,
+                    "signal_basis_date": last_session.isoformat(),
                     "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")
                 })
             except Exception:
