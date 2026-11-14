@@ -1,4 +1,4 @@
-# Daya AI Pro v0.3.1 — Swing + Gemini + Money Management tanpa modal
+# Daya AI Pro v0.4.2 — Swing + Gemini + US Entry Plan
 
 ## Perubahan
 - Setiap kandidat menampilkan alasan tren (EMA20/50/200) dan momentum (RSI14).
@@ -31,3 +31,10 @@
 
 ## Gemini
 Menggunakan endpoint `gemini-2.5-flash`. Ketersediaan model dapat berbeda menurut akun/region dan dapat berubah; jika Google mengembalikan error model tidak ditemukan/tidak didukung, model perlu disesuaikan dengan model yang aktif pada Google AI Studio.
+
+
+## v0.4.3 – Perbaikan Entry Saham Indonesia
+- Zona entry BEI memakai EMA20 jika masih dekat dengan harga penutupan; jika terlalu jauh, memakai pullback berbasis ATR yang dibatasi agar area tidak lebih dari sekitar 3% di bawah harga terakhir.
+- Stop Loss dan TP1–TP3 dihitung ulang dari zona entry dan ATR14.
+- Masa berlaku rencana entry dihitung 5 hari kerja dari tanggal candle harian terakhir. Setelah lewat, level entry/SL/TP disembunyikan dan ditandai EXPIRED.
+- Perhitungan hari kerja belum memasukkan hari libur resmi BEI. Jika tanggal candle tidak tersedia dari API, aplikasi memberi peringatan bahwa masa berlaku tidak dapat diverifikasi.
