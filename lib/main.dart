@@ -663,11 +663,13 @@ class USStockDetailPage extends StatelessWidget {
             Text('Take Profit 1: \$${tp1.toStringAsFixed(2)}'),
             Text('Take Profit 2: \$${tp2.toStringAsFixed(2)}'),
           ] else if (expired)
-            const Text('Jangan gunakan level entry lama. Tunggu data harian terbaru dan hitung ulang rencana.'),
-          else if (setup == 'WAIT')
-            const Text('Tren mulai mendukung, tetapi momentum/volume belum memenuhi syarat entry. Tunggu konfirmasi.'),
-          else
-            const Text('Belum ada kombinasi tren, momentum, dan volume yang cukup mendukung. Tidak disarankan memaksakan entry.'),
+            const Text('Jangan gunakan level entry lama. Tunggu data harian terbaru dan hitung ulang rencana.')
+          else ...[
+            if (setup == 'WAIT')
+              const Text('Tren mulai mendukung, tetapi momentum/volume belum memenuhi syarat entry. Tunggu konfirmasi.')
+            else
+              const Text('Belum ada kombinasi tren, momentum, dan volume yang cukup mendukung. Tidak disarankan memaksakan entry.'),
+          ],
           const SizedBox(height: 8),
           Text('EMA20: \$${numVal(stock['ema20']).toStringAsFixed(2)}  •  EMA50: \$${numVal(stock['ema50']).toStringAsFixed(2)}'),
           Text('RSI14: ${numVal(stock['rsi14']).toStringAsFixed(1)}  •  ATR14: \$${numVal(stock['atr14']).toStringAsFixed(2)}'),
