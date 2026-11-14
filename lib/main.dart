@@ -98,13 +98,14 @@ class USMarketService {
 
 class StockAnalysis {
   final String symbol, name, signal, reason;
-  final double close, changePct, score, rsi, ema20, ema50, ema200, atr, entry, tp1, tp2, tp3, sl, rr1, rr2, rr3;
+  final double close, changePct, score, rsi, ema20, ema50, ema200, atr, entry, entryLow, entryHigh, tp1, tp2, tp3, sl, rr1, rr2, rr3;
   final String trendReason, momentumReason, riskReason;
   final int bars;
+  final DateTime? signalDate, validUntil;
   StockAnalysis({required this.symbol, required this.name, required this.signal, required this.reason,
     required this.close, required this.changePct, required this.score, required this.rsi,
     required this.ema20, required this.ema50, required this.ema200, required this.atr,
-    required this.entry, required this.tp1, required this.tp2, required this.tp3, required this.sl, required this.rr1, required this.rr2, required this.rr3, required this.trendReason, required this.momentumReason, required this.riskReason, required this.bars});
+    required this.entry, required this.entryLow, required this.entryHigh, required this.tp1, required this.tp2, required this.tp3, required this.sl, required this.rr1, required this.rr2, required this.rr3, required this.trendReason, required this.momentumReason, required this.riskReason, required this.bars, required this.signalDate, required this.validUntil});
 }
 
 String compactNum(double n) {
@@ -130,6 +131,31 @@ double rsi(List<double> values, [int period = 14]) {
   final rs = (gains/period) / (losses/period);
   return 100 - (100/(1+rs));
 }
+DateTime? _barDate(Map<String, dynamic> bar) {
+  for (final key in ['date', 'datetime', 'trading_date', 'timestamp', 'time']) {
+    final value = bar[key];
+    if (value == null) continue;
+    if (value is num) {
+      final raw = value.toInt();
+      final millis = raw.abs() < 100000000000 ? raw * 1000 : raw;
+      try { return DateTime.fromMillisecondsSinceEpoch(millis).toLocal(); } catch (_) {}
+    }
+    final parsed = DateTime.tryParse(value.toString());
+    if (parsed != null) return parsed.toLocal();
+  }
+  return null;
+}
+
+DateTime _addWeekdays(DateTime date, int days) {
+  var result = DateTime(date.year, date.month, date.day);
+  var added = 0;
+  while (added < days) {
+    result = result.add(const Duration(days: 1));
+    if (result.weekday != DateTime.saturday && result.weekday != DateTime.sunday) added++;
+  }
+  return result;
+}
+
 StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynamic>> bars) {
   final closes = bars.map((e) => numVal(e['close'])).where((v) => v > 0).toList();
   final close = closes.isEmpty ? numVal(instrument['last']) : closes.last;
@@ -156,12 +182,23 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
   if (change > 0) score += 10;
   if (bars.length >= 200) score += 15; else if (bars.length >= 50) score += 8;
   final valid = bars.length >= 50 && close > 0 && atr > 0;
-  // Entry acuan menggunakan EMA20 sebagai area rencana pullback.
-  final entry = valid && e20 > 0 ? e20 : 0.0;
-  final sl = valid ? entry - (1.5 * atr) : 0.0;
-  final tp1 = valid ? entry + (1.5 * atr) : 0.0;
-  final tp2 = valid ? entry + (2.25 * atr) : 0.0;
-  final tp3 = valid ? entry + (3.0 * atr) : 0.0;
+  // Zona entry BEI dijaga dekat harga penutupan: maksimal sekitar 3% di bawah close.
+  // EMA20 dipakai hanya bila masih dekat; jika terlalu jauh, gunakan pullback ATR yang dibatasi.
+  final nearEma20 = valid && e20 > 0 && e20 <= close && (close - e20) <= close * 0.025;
+  final fallbackPullback = valid ? (0.35 * atr).clamp(close * 0.005, close * 0.015).toDouble() : 0.0;
+  final rawCenter = nearEma20 ? e20 : close - fallbackPullback;
+  final entryCenter = valid ? rawCenter.clamp(close * 0.975, close * 0.995).toDouble() : 0.0;
+  final halfWidth = valid ? (0.12 * atr).clamp(close * 0.002, close * 0.005).toDouble() : 0.0;
+  final entryLow = valid ? (entryCenter - halfWidth).clamp(close * 0.97, close * 0.995).toDouble() : 0.0;
+  final entryHigh = valid ? (entryCenter + halfWidth).clamp(entryLow, close * 0.998).toDouble() : 0.0;
+  final entry = valid ? (entryLow + entryHigh) / 2 : 0.0;
+  final sl = valid ? entryLow - (1.2 * atr) : 0.0;
+  final risk = valid ? (entry - sl) : 0.0;
+  final tp1 = valid ? entry + (1.5 * risk) : 0.0;
+  final tp2 = valid ? entry + (2.0 * risk) : 0.0;
+  final tp3 = valid ? entry + (2.5 * risk) : 0.0;
+  final signalDate = bars.isNotEmpty ? _barDate(bars.last) : null;
+  final validUntil = signalDate == null ? null : _addWeekdays(signalDate, 5);
         final trendReason = valid
       ? (close > e20 && e20 > e50 && e50 > e200
           ? 'Tren naik tersusun: harga > EMA20 > EMA50 > EMA200.'
@@ -200,7 +237,7 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
       ? 'DATA KURANG'
       : !trendValid
           ? 'WAIT'
-          : close <= entry * 1.02
+          : close <= entryHigh * 1.015
               ? 'AREA ENTRY'
               : 'MENUNGGU PULLBACK';
 
@@ -222,6 +259,8 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
     ema200: e200,
     atr: atr,
     entry: entry,
+    entryLow: entryLow,
+    entryHigh: entryHigh,
     tp1: tp1,
     tp2: tp2,
     tp3: tp3,
@@ -233,6 +272,8 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
     momentumReason: momentumReason,
     riskReason: riskReason,
     bars: closes.length,
+    signalDate: signalDate,
+    validUntil: validUntil,
   );
 }
 
@@ -384,16 +425,23 @@ class _ScreenerPageState extends State<ScreenerPage> {
         if(usStocks.isNotEmpty) ...[
           Text('Top ${usStocks.length} berdasarkan RVOL',style:const TextStyle(color:teal,fontWeight:FontWeight.w800,fontSize:12)),
           const SizedBox(height:6),
-          ...usStocks.take(25).map((s)=>_panel(child:Row(children:[
-            Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-              Text('${s['symbol']??''} • ${s['name']??''}',maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontWeight:FontWeight.w800)),
-              Text('Vol ${compactNum(numVal(s['volume']))} • Avg20 ${compactNum(numVal(s['avg_volume_20']))}',style:const TextStyle(color:muted,fontSize:10))
-            ])),
-            Column(crossAxisAlignment:CrossAxisAlignment.end,children:[
-              Text('RVOL ${numVal(s['rvol']).toStringAsFixed(2)}x',style:TextStyle(color:numVal(s['rvol'])>=1.5?green:amber,fontWeight:FontWeight.w900)),
-              Text('${numVal(s['change_pct'])>=0?'+':''}${numVal(s['change_pct']).toStringAsFixed(2)}%',style:TextStyle(color:numVal(s['change_pct'])>=0?green:red,fontSize:11))
-            ])
-          ]))),
+          ...usStocks.take(25).map((s)=>Material(
+            color:Colors.transparent,
+            child:InkWell(
+              borderRadius:BorderRadius.circular(17),
+              onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>USStockDetailPage(stock:s))),
+              child:_panel(child:Row(children:[
+                Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+                  Text('${s['symbol']??''} • ${s['name']??''}',maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontWeight:FontWeight.w800)),
+                  Text('Vol ${compactNum(numVal(s['volume']))} • Avg20 ${compactNum(numVal(s['avg_volume_20']))}',style:const TextStyle(color:muted,fontSize:10))
+                ])),
+                Column(crossAxisAlignment:CrossAxisAlignment.end,children:[
+                  Text('RVOL ${numVal(s['rvol']).toStringAsFixed(2)}x',style:TextStyle(color:numVal(s['rvol'])>=1.5?green:amber,fontWeight:FontWeight.w900)),
+                  Text('${numVal(s['change_pct'])>=0?'+':''}${numVal(s['change_pct']).toStringAsFixed(2)}%',style:TextStyle(color:numVal(s['change_pct'])>=0?green:red,fontSize:11))
+                ])
+              ])),
+            ),
+          )),
           if(usStocks.isNotEmpty) Text('Update: ${usStocks.first['updated_at']??'—'}',style:const TextStyle(color:muted,fontSize:9))
         ]
       ])),
@@ -541,6 +589,100 @@ class CandidateCard extends StatelessWidget {
 }
 Widget _metric(String label,double value)=>SizedBox(width:105,child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(label,style:const TextStyle(color:muted,fontSize:9)),const SizedBox(height:3),Text(money(value),style:const TextStyle(fontSize:11,fontWeight:FontWeight.w800))]));
 
+class USStockDetailPage extends StatelessWidget {
+  final Map<String, dynamic> stock;
+  const USStockDetailPage({super.key, required this.stock});
+
+  @override
+  Widget build(BuildContext context) {
+    final symbol = (stock['symbol'] ?? '—').toString();
+    final name = (stock['name'] ?? '').toString();
+    final close = numVal(stock['close']);
+    final change = numVal(stock['change_pct']);
+    final volume = numVal(stock['volume']);
+    final avgVolume = numVal(stock['avg_volume_20']);
+    final rvol = numVal(stock['rvol']);
+    final updated = (stock['updated_at'] ?? '—').toString();
+    final setup = (stock['setup'] ?? 'NO TRADE').toString().toUpperCase();
+    final validUntilText = (stock['valid_until'] ?? '').toString();
+    final validUntil = DateTime.tryParse(validUntilText);
+    final expired = validUntil != null && DateTime.now().isAfter(
+      DateTime(validUntil.year, validUntil.month, validUntil.day, 23, 59, 59),
+    );
+    final entryLow = numVal(stock['entry_low']);
+    final entryHigh = numVal(stock['entry_high']);
+    final stopLoss = numVal(stock['stop_loss']);
+    final tp1 = numVal(stock['take_profit_1']);
+    final tp2 = numVal(stock['take_profit_2']);
+    final volumeNote = rvol >= 2
+        ? 'Aktivitas volume sangat tinggi dibanding rata-rata 20 hari.'
+        : rvol >= 1.2
+            ? 'Aktivitas volume di atas rata-rata 20 hari.'
+            : rvol > 0
+                ? 'Aktivitas volume belum menunjukkan lonjakan besar.'
+                : 'Data RVOL belum tersedia.';
+
+    Widget metric(String label, String value) => Expanded(
+      child: _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(label, style: const TextStyle(color: muted, fontSize: 10)),
+        const SizedBox(height: 5),
+        Text(value, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
+      ])),
+    );
+
+    return Scaffold(
+      appBar: AppBar(title: Text('$symbol • Detail Saham AS')),
+      body: ListView(padding: const EdgeInsets.all(16), children: [
+        _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(symbol, style: const TextStyle(color: teal, fontSize: 25, fontWeight: FontWeight.w900)),
+          if (name.isNotEmpty) Text(name, style: const TextStyle(color: muted)),
+          const SizedBox(height: 12),
+          Text('\$${close.toStringAsFixed(2)}', style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900)),
+          Text('${change >= 0 ? '+' : ''}${change.toStringAsFixed(2)}% perubahan harian',
+            style: TextStyle(color: change >= 0 ? green : red, fontWeight: FontWeight.w700)),
+        ])),
+        const SizedBox(height: 10),
+        Row(children: [metric('RVOL', '${rvol.toStringAsFixed(2)}x'), const SizedBox(width: 8), metric('Volume', compactNum(volume))]),
+        const SizedBox(height: 8),
+        Row(children: [metric('Rata-rata volume 20D', compactNum(avgVolume)), const SizedBox(width: 8), metric('Perubahan', '${change.toStringAsFixed(2)}%')]),
+        const SizedBox(height: 10),
+        _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Interpretasi volume', style: TextStyle(fontWeight: FontWeight.w800)),
+          const SizedBox(height: 6), Text(volumeNote, style: const TextStyle(color: Colors.white70, height: 1.4)),
+        ])),
+        const SizedBox(height: 10),
+        _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Rencana Entry Swing (1D)', style: TextStyle(fontWeight: FontWeight.w900, color: teal, fontSize: 15)),
+          const SizedBox(height: 8),
+          Text(expired ? 'EXPIRED • Sinyal kedaluwarsa' : setup,
+            style: TextStyle(fontWeight: FontWeight.w900, color: expired ? red : setup == 'BUY SETUP' ? green : amber, fontSize: 16)),
+          const SizedBox(height: 8),
+          if (setup == 'BUY SETUP' && !expired) ...[
+            Text('Zona entry: \$${entryLow.toStringAsFixed(2)} – \$${entryHigh.toStringAsFixed(2)}'),
+            Text('Stop Loss: \$${stopLoss.toStringAsFixed(2)}'),
+            Text('Take Profit 1: \$${tp1.toStringAsFixed(2)}'),
+            Text('Take Profit 2: \$${tp2.toStringAsFixed(2)}'),
+          ] else if (expired)
+            const Text('Jangan gunakan level entry lama. Tunggu data harian terbaru dan hitung ulang rencana.'),
+          else if (setup == 'WAIT')
+            const Text('Tren mulai mendukung, tetapi momentum/volume belum memenuhi syarat entry. Tunggu konfirmasi.'),
+          else
+            const Text('Belum ada kombinasi tren, momentum, dan volume yang cukup mendukung. Tidak disarankan memaksakan entry.'),
+          const SizedBox(height: 8),
+          Text('EMA20: \$${numVal(stock['ema20']).toStringAsFixed(2)}  •  EMA50: \$${numVal(stock['ema50']).toStringAsFixed(2)}'),
+          Text('RSI14: ${numVal(stock['rsi14']).toStringAsFixed(1)}  •  ATR14: \$${numVal(stock['atr14']).toStringAsFixed(2)}'),
+          Text('Berlaku sampai: ${validUntilText.isEmpty ? '—' : validUntilText} (5 hari bursa, perkiraan)'),
+          Text('Dasar data: ${stock['signal_basis_date'] ?? '—'}', style: const TextStyle(color: muted, fontSize: 10)),
+        ])),
+        const SizedBox(height: 8),
+        const InfoBox('Rencana ini dihitung dari candle harian (EMA20/50, RSI14, ATR14, dan RVOL), bukan harga real-time. Masa berlaku 5 hari kerja hanya perkiraan hari bursa dan tidak memperhitungkan semua hari libur bursa AS. Jika harga sudah bergerak jauh dari zona entry, jangan mengejar harga; tunggu kalkulasi terbaru. Ini bukan jaminan profit.'),
+        const SizedBox(height: 8),
+        Text('Pembaruan data: $updated', style: const TextStyle(color: muted, fontSize: 10)),
+      ]),
+    );
+  }
+}
+
 class AnalysisPage extends StatefulWidget { const AnalysisPage({super.key}); @override State<AnalysisPage> createState()=>_AnalysisPageState(); }
 class _AnalysisPageState extends State<AnalysisPage>{final api=ApiService();final ctrl=TextEditingController();bool loading=false;StockAnalysis? result;String error='';
  Future<void> run() async {final symbol=ctrl.text.trim().toUpperCase();if(!RegExp(r'^[A-Z]{4}$').hasMatch(symbol)){setState(()=>error='Masukkan kode saham 4 huruf, misalnya BBCA.');return;}setState(()=>{loading=true,error='',result=null});try{final bars=await api.daily(symbol);final inst={'symbol':symbol,'name':symbol,'last':bars.isNotEmpty?bars.last['close']:0,'change_pct':0};final a=analyzeDaily(inst,bars);setState(()=>result=a);}catch(e){setState(()=>error=e.toString().replaceFirst('Exception: ',''));}finally{if(mounted)setState(()=>loading=false);}}
@@ -571,7 +713,7 @@ class _MorePageState extends State<MorePage>{
   const InfoBox('Money Management tanpa modal: panduan risiko 1% per transaksi, batas rugi harian 2%, maksimal 3 posisi. Break-even dapat dipertimbangkan setelah TP1; trailing stop mengikuti swing low/ATR. Ini parameter panduan manual; belum terhubung ke saldo broker atau eksekusi order.'),
   const InfoBox('Keamanan: key disimpan di secure storage perangkat, tetapi key yang dipakai langsung dari APK masih dapat diekstrak oleh pihak yang menguasai perangkat. Untuk aplikasi publik, gunakan backend pribadi.'),
   const InfoBox('Paket Api.co.id Free memiliki batas 500 hit/bulan. Karena setiap emiten membutuhkan request riwayat harian, pemindaian seluruh saham BEI setiap hari belum dapat dilakukan dengan paket ini.'),
-  const SizedBox(height:12),const MenuRow(icon:Icons.info_outline,title:'Tentang Daya AI Pro',subtitle:'Versi 0.3.1 • Swing + Gemini + MM tanpa modal')
+  const SizedBox(height:12),const MenuRow(icon:Icons.info_outline,title:'Tentang Daya AI Pro',subtitle:'Versi 0.4.3 • Swing + Gemini + IDX/US Entry Plan')
  ]);
 }
 
@@ -697,10 +839,18 @@ class _StockDetailPageState extends State<StockDetailPage> {
           Text('EMA50: ${money(analysis!.ema50)}'),
           Text('EMA200: ${money(analysis!.ema200)}'),
           Text('ATR14: ${money(analysis!.atr)}'),
-          Text('Entry acuan: ${money(analysis!.entry)}'),
-          Text('Stop referensi: ${money(analysis!.sl)}'),
-          Text('TP1 / TP2 / TP3: ${money(analysis!.tp1)} / ${money(analysis!.tp2)} / ${money(analysis!.tp3)}'),
-          Text('Risk/Reward: 1:${analysis!.rr1.toStringAsFixed(2)} / 1:${analysis!.rr2.toStringAsFixed(2)} / 1:${analysis!.rr3.toStringAsFixed(2)}'),
+          if (analysis!.validUntil != null && DateTime.now().isAfter(analysis!.validUntil!))
+            const Text('EXPIRED • Area entry kedaluwarsa. Jangan gunakan level lama; muat ulang data dan analisis.', style: TextStyle(color: red, fontWeight: FontWeight.w900))
+          else if (analysis!.validUntil != null)
+            Text('Berlaku sampai: ${analysis!.validUntil!.day.toString().padLeft(2, '0')}-${analysis!.validUntil!.month.toString().padLeft(2, '0')}-${analysis!.validUntil!.year} (5 hari bursa)', style: const TextStyle(color: green, fontWeight: FontWeight.w700)),
+          if (analysis!.signalDate == null)
+            const Text('Tanggal candle tidak tersedia; masa berlaku belum dapat diverifikasi.', style: TextStyle(color: amber)),
+          if (analysis!.validUntil == null || !DateTime.now().isAfter(analysis!.validUntil!)) ...[
+            Text('Zona entry: ${money(analysis!.entryLow)} – ${money(analysis!.entryHigh)}'),
+            Text('Stop Loss: ${money(analysis!.sl)}'),
+            Text('TP1 / TP2 / TP3: ${money(analysis!.tp1)} / ${money(analysis!.tp2)} / ${money(analysis!.tp3)}'),
+            Text('Risk/Reward: 1:${analysis!.rr1.toStringAsFixed(2)} / 1:${analysis!.rr2.toStringAsFixed(2)} / 1:${analysis!.rr3.toStringAsFixed(2)}'),
+          ],
           Text('Candle harian: ${analysis!.bars}'),
           const Divider(color: panel2),
           Text('ALASAN TREN', style: const TextStyle(color: teal, fontWeight: FontWeight.w800)),
@@ -715,7 +865,7 @@ class _StockDetailPageState extends State<StockDetailPage> {
           const Text('Panduan tanpa input modal: risiko 1% per transaksi, batas rugi harian 2%, maksimal 3 posisi. Pertimbangkan break-even setelah TP1 dan trailing stop mengikuti swing low/ATR. Aturan harus diterapkan manual; aplikasi tidak memantau saldo atau order broker.', style: TextStyle(color: Colors.white70, height: 1.5)),
         ])),
         const SizedBox(height: 12),
-        const InfoBox('Analisis ini memakai data historis harian dari paket Free, bukan harga real-time atau sinyal scalping 5 menit. Ini bukan rekomendasi beli/jual.'),
+        const InfoBox('Zona entry BEI dihitung dekat penutupan terakhir (dibatasi sekitar 3% di bawah harga) dengan EMA20/ATR14. Berlaku 5 hari kerja dari tanggal candle terakhir; hitungan hari kerja tidak memasukkan libur bursa BEI. Jika expired, level entry/SL/TP disembunyikan dan harus dihitung ulang. Data EOD bukan harga real-time dan bukan jaminan profit.'),
       ]),
     );
   }
