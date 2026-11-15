@@ -62,6 +62,39 @@ def safe_num(value):
     except Exception:
         return 0.0
 
+def extract_symbol_frame(data: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Handle yfinance's changing single-/multi-ticker column layouts."""
+    if data is None or data.empty:
+        return pd.DataFrame()
+    if not isinstance(data.columns, pd.MultiIndex):
+        return data.copy()
+
+    # yfinance commonly returns (Price, Ticker), but some versions/layouts
+    # return (Ticker, Price). Detect the ticker level instead of assuming it.
+    for level in range(data.columns.nlevels):
+        try:
+            values = data.columns.get_level_values(level)
+            if symbol in values:
+                frame = data.xs(symbol, axis=1, level=level, drop_level=True)
+                if isinstance(frame.columns, pd.MultiIndex):
+                    frame.columns = frame.columns.get_level_values(-1)
+                return frame.copy()
+        except (KeyError, ValueError):
+            pass
+    return pd.DataFrame()
+
+def calculate_rsi(closes: pd.Series, period: int = 14) -> float:
+    delta = closes.diff()
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    avg_gain = gains.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    avg_loss = losses.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    last_gain, last_loss = safe_num(avg_gain.iloc[-1]), safe_num(avg_loss.iloc[-1])
+    if last_loss == 0:
+        return 100.0 if last_gain > 0 else 50.0
+    rs = last_gain / last_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
 def main():
     symbols = universe()
     print(f"Universe directory: {len(symbols)} symbols")
@@ -82,10 +115,20 @@ def main():
             continue
         for sym in batch:
             try:
-                frame = data[sym].copy() if isinstance(data.columns, pd.MultiIndex) else data.copy()
-                if frame.empty or "Close" not in frame or "Volume" not in frame: continue
-                frame = frame.dropna(subset=["Close"])
-                if len(frame) < 22: continue
+                frame = extract_symbol_frame(data, sym)
+                if frame.empty:
+                    print(f"{sym}: tidak ditemukan pada hasil download")
+                    continue
+                # Normalize column labels (some yfinance releases return tuples).
+                frame.columns = [str(c[0] if isinstance(c, tuple) else c).title() for c in frame.columns]
+                required = {"Close", "High", "Low", "Volume"}
+                if not required.issubset(set(frame.columns)):
+                    print(f"{sym}: kolom OHLCV tidak lengkap: {list(frame.columns)}")
+                    continue
+                frame = frame.dropna(subset=["Close", "High", "Low"])
+                if len(frame) < 55:
+                    print(f"{sym}: candle historis kurang ({len(frame)} bar)")
+                    continue
                 close = safe_num(frame["Close"].iloc[-1])
                 prev = safe_num(frame["Close"].iloc[-2])
                 volume = safe_num(frame["Volume"].iloc[-1])
@@ -105,18 +148,28 @@ def main():
                 atr14 = safe_num(true_range.rolling(14).mean().iloc[-1])
                 ema20 = safe_num(closes.ewm(span=20, adjust=False).mean().iloc[-1])
                 ema50 = safe_num(closes.ewm(span=50, adjust=False).mean().iloc[-1])
-                delta = closes.diff()
-                gain = delta.clip(lower=0).rolling(14).mean()
-                loss = (-delta.clip(upper=0)).rolling(14).mean()
-                rs = gain / loss.replace(0, float("nan"))
-                rsi14 = safe_num((100 - (100 / (1 + rs))).iloc[-1])
-                if rsi14 == 0 and safe_num(loss.iloc[-1]) == 0 and safe_num(gain.iloc[-1]) > 0:
-                    rsi14 = 100.0
+                ema200 = safe_num(closes.ewm(span=200, adjust=False).mean().iloc[-1]) if len(closes) >= 200 else 0.0
+                rsi14 = calculate_rsi(closes, 14)
+                macd_line = closes.ewm(span=12, adjust=False).mean() - closes.ewm(span=26, adjust=False).mean()
+                macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+                macd_value = safe_num(macd_line.iloc[-1])
+                macd_signal_value = safe_num(macd_signal.iloc[-1])
+                macd_histogram = macd_value - macd_signal_value
+                indicators_valid = all(v > 0 for v in (ema20, ema50, atr14)) and rsi14 > 0
 
-                # Only publish an entry plan when trend, momentum and volatility data agree.
+                # Anti-chasing: block fresh entries after an extreme daily move,
+                # excessive extension from EMA20, or overbought RSI.
+                anti_chase_reason = ""
+                if ((close / prev - 1) * 100 >= 15) if prev > 0 else False:
+                    anti_chase_reason = "Kenaikan harian >=15%; hindari mengejar harga."
+                elif atr14 > 0 and close > ema20 and (close - ema20) >= 1.5 * atr14:
+                    anti_chase_reason = "Harga terlalu jauh dari EMA20 dibanding ATR14; tunggu pullback."
+                elif rsi14 >= 75:
+                    anti_chase_reason = "RSI14 >=75; kondisi jenuh beli, tunggu pendinginan."
+
                 setup = "NO TRADE"
                 entry_low = entry_high = stop_loss = take_profit_1 = take_profit_2 = 0.0
-                if atr14 > 0 and ema20 > ema50 and close > ema20 and 48 <= rsi14 <= 68 and rvol >= 0.8:
+                if indicators_valid and not anti_chase_reason and atr14 > 0 and ema20 > ema50 and close > ema20 and 48 <= rsi14 <= 68 and rvol >= 0.8:
                     setup = "BUY SETUP"
                     entry_low = max(0.01, close - 0.50 * atr14)
                     entry_high = max(entry_low, close - 0.15 * atr14)
@@ -125,8 +178,12 @@ def main():
                     risk = max(0.01, entry_mid - stop_loss)
                     take_profit_1 = entry_mid + 1.5 * risk
                     take_profit_2 = entry_mid + 2.0 * risk
-                elif atr14 > 0 and ema20 > ema50 and close > ema20:
+                elif indicators_valid and not anti_chase_reason and atr14 > 0 and ema20 > ema50 and close > ema20:
                     setup = "WAIT"
+
+                if not indicators_valid:
+                    setup = "DATA INCOMPLETE"
+                    anti_chase_reason = "Indikator belum lengkap; jangan gunakan sinyal entry sampai data historis valid."
 
                 last_session = pd.Timestamp(frame.index[-1]).date()
                 # Five weekday sessions; exchange holidays are not excluded in this approximation.
@@ -141,9 +198,17 @@ def main():
                     "change_pct": round(((close / prev) - 1) * 100, 3) if prev > 0 else 0,
                     "ema20": round(ema20, 4),
                     "ema50": round(ema50, 4),
+                    "ema200": round(ema200, 4) if ema200 > 0 else None,
                     "rsi14": round(rsi14, 2),
                     "atr14": round(atr14, 4),
+                    "macd": round(macd_value, 5),
+                    "macd_signal": round(macd_signal_value, 5),
+                    "macd_histogram": round(macd_histogram, 5),
+                    "candle_count": int(len(frame)),
+                    "indicator_status": "OK" if indicators_valid else "INCOMPLETE",
                     "setup": setup,
+                    "anti_chase": bool(anti_chase_reason),
+                    "anti_chase_reason": anti_chase_reason,
                     "entry_low": round(entry_low, 4) if entry_low else None,
                     "entry_high": round(entry_high, 4) if entry_high else None,
                     "stop_loss": round(stop_loss, 4) if stop_loss else None,
