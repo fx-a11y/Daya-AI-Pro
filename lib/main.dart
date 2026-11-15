@@ -99,12 +99,14 @@ class USMarketService {
 class StockAnalysis {
   final String symbol, name, signal, reason;
   final double close, changePct, score, rsi, ema20, ema50, ema200, atr, entry, entryLow, entryHigh, tp1, tp2, tp3, sl, rr1, rr2, rr3;
+  final double volume, avgVolume20, rvol;
   final String trendReason, momentumReason, riskReason;
   final int bars;
   final DateTime? signalDate, validUntil;
   StockAnalysis({required this.symbol, required this.name, required this.signal, required this.reason,
     required this.close, required this.changePct, required this.score, required this.rsi,
     required this.ema20, required this.ema50, required this.ema200, required this.atr,
+    required this.volume, required this.avgVolume20, required this.rvol,
     required this.entry, required this.entryLow, required this.entryHigh, required this.tp1, required this.tp2, required this.tp3, required this.sl, required this.rr1, required this.rr2, required this.rr3, required this.trendReason, required this.momentumReason, required this.riskReason, required this.bars, required this.signalDate, required this.validUntil});
 }
 
@@ -159,6 +161,14 @@ DateTime _addWeekdays(DateTime date, int days) {
 StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynamic>> bars) {
   final closes = bars.map((e) => numVal(e['close'])).where((v) => v > 0).toList();
   final close = closes.isEmpty ? numVal(instrument['last']) : closes.last;
+  // Volume BEI diambil dari candle harian terakhir; rata-rata dihitung dari 20 candle terakhir.
+  final volumeValues = bars.map((e) => numVal(e['volume'] ?? e['vol'])).toList();
+  final volume = volumeValues.isNotEmpty ? volumeValues.last : 0.0;
+  final recentVolumes = volumeValues.where((v) => v > 0).toList();
+  final avgVolume20 = recentVolumes.length >= 20
+      ? recentVolumes.skip(recentVolumes.length - 20).reduce((a, b) => a + b) / 20
+      : (recentVolumes.isNotEmpty ? recentVolumes.reduce((a, b) => a + b) / recentVolumes.length : 0.0);
+  final rvol = avgVolume20 > 0 && volume > 0 ? volume / avgVolume20 : 0.0;
   final change = numVal(instrument['change_pct']);
   final e20 = ema(closes,20), e50 = ema(closes,50), e200 = ema(closes,200), strength = rsi(closes);
   double atr = 0;
@@ -258,6 +268,9 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
     ema50: e50,
     ema200: e200,
     atr: atr,
+    volume: volume,
+    avgVolume20: avgVolume20,
+    rvol: rvol,
     entry: entry,
     entryLow: entryLow,
     entryHigh: entryHigh,
@@ -665,7 +678,9 @@ class USStockDetailPage extends StatelessWidget {
           ] else if (expired)
             const Text('Jangan gunakan level entry lama. Tunggu data harian terbaru dan hitung ulang rencana.')
           else ...[
-            if (setup == 'WAIT')
+            if (stock['anti_chase'] == true)
+              Text('ANTI-CHASING: ${stock['anti_chase_reason'] ?? 'Hindari mengejar harga; tunggu pullback.'}', style: const TextStyle(color: amber, height: 1.4))
+            else if (setup == 'WAIT')
               const Text('Tren mulai mendukung, tetapi momentum/volume belum memenuhi syarat entry. Tunggu konfirmasi.')
             else
               const Text('Belum ada kombinasi tren, momentum, dan volume yang cukup mendukung. Tidak disarankan memaksakan entry.'),
@@ -683,7 +698,7 @@ class USStockDetailPage extends StatelessWidget {
           Text('EMA20: ${numVal(stock['ema20']) > numVal(stock['ema50']) ? 'di atas EMA50 (bias tren positif)' : 'belum di atas EMA50 (tren belum kuat)'}.', style: const TextStyle(color: Colors.white70, height: 1.45)),
           Text('RSI14 ${numVal(stock['rsi14']).toStringAsFixed(1)}: ${numVal(stock['rsi14']) >= 50 && numVal(stock['rsi14']) <= 68 ? 'momentum positif dan relatif terjaga' : numVal(stock['rsi14']) > 68 ? 'momentum kuat tetapi rawan jenuh beli' : 'momentum belum cukup kuat'}.', style: const TextStyle(color: Colors.white70, height: 1.45)),
           Text('RVOL ${rvol.toStringAsFixed(2)}x: ${rvol >= 1.5 ? 'volume meningkat kuat' : rvol >= 1 ? 'volume di sekitar/di atas rata-rata' : 'volume di bawah rata-rata 20 hari'}.', style: const TextStyle(color: Colors.white70, height: 1.45)),
-          Text('Kesimpulan: ${setup == 'BUY SETUP' && !expired ? 'tren, momentum, dan volume memenuhi filter awal; tetap tunggu harga masuk zona entry' : setup == 'WAIT' && !expired ? 'sebagian kondisi mendukung, tunggu konfirmasi momentum/volume' : expired ? 'sinyal sudah kedaluwarsa; hitung ulang sebelum mengambil keputusan' : 'kombinasi indikator belum mendukung entry; hindari memaksakan transaksi'}.', style: const TextStyle(color: Colors.white70, height: 1.45)),
+          Text('Kesimpulan: ${stock['anti_chase'] == true ? 'filter anti-chasing aktif; jangan mengejar harga dan tunggu pullback' : setup == 'BUY SETUP' && !expired ? 'tren, momentum, dan volume memenuhi filter awal; tetap tunggu harga masuk zona entry' : setup == 'WAIT' && !expired ? 'sebagian kondisi mendukung, tunggu konfirmasi momentum/volume' : expired ? 'sinyal sudah kedaluwarsa; hitung ulang sebelum mengambil keputusan' : 'kombinasi indikator belum mendukung entry; hindari memaksakan transaksi'}.', style: const TextStyle(color: Colors.white70, height: 1.45)),
         ])),
         const SizedBox(height: 10),
         _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -845,6 +860,14 @@ class _StockDetailPageState extends State<StockDetailPage> {
           const SizedBox(height: 4),
           Text(money(numVal(widget.instrument['last'])), style: const TextStyle(fontSize: 23, fontWeight: FontWeight.w800)),
           Text('Perubahan harian: ${numVal(widget.instrument['change_pct']).toStringAsFixed(2)}%', style: const TextStyle(color: Colors.white70)),
+          const SizedBox(height: 12),
+          Row(children: [
+            Expanded(child: _metricBox('Volume harian', analysis == null ? 'Memuat…' : (analysis!.volume > 0 ? compactNum(analysis!.volume) + ' lembar' : 'Tidak tersedia'))),
+            const SizedBox(width: 8),
+            Expanded(child: _metricBox('Rata-rata volume 20D', analysis == null ? 'Memuat…' : (analysis!.avgVolume20 > 0 ? compactNum(analysis!.avgVolume20) + ' lembar' : 'Tidak tersedia'))),
+          ]),
+          const SizedBox(height: 8),
+          _metricBox('RVOL', analysis == null ? 'Memuat…' : (analysis!.rvol > 0 ? analysis!.rvol.toStringAsFixed(2) + 'x' : 'Tidak tersedia')),
         ])),
         const SizedBox(height: 14),
         const SectionTitle('Analisis teknikal historis', 'DATA HARIAN'),
@@ -876,6 +899,9 @@ class _StockDetailPageState extends State<StockDetailPage> {
             Text('Risk/Reward: 1:${analysis!.rr1.toStringAsFixed(2)} / 1:${analysis!.rr2.toStringAsFixed(2)} / 1:${analysis!.rr3.toStringAsFixed(2)}'),
           ],
           Text('Candle harian: ${analysis!.bars}'),
+          Text('Volume hari terakhir: ${analysis!.volume > 0 ? compactNum(analysis!.volume) + ' lembar' : 'Tidak tersedia'}'),
+          Text('Rata-rata volume 20D: ${analysis!.avgVolume20 > 0 ? compactNum(analysis!.avgVolume20) + ' lembar' : 'Tidak tersedia'}'),
+          Text('RVOL: ${analysis!.rvol > 0 ? analysis!.rvol.toStringAsFixed(2) + 'x' : 'Tidak tersedia'}'),
           const Divider(color: panel2),
           Text('ALASAN TREN', style: const TextStyle(color: teal, fontWeight: FontWeight.w800)),
           Text(analysis!.trendReason, style: const TextStyle(color: Colors.white70, height: 1.5)),
@@ -898,5 +924,15 @@ class _StockDetailPageState extends State<StockDetailPage> {
     );
   }
 }
+Widget _metricBox(String label, String value) => Container(
+  padding: const EdgeInsets.all(12),
+  decoration: BoxDecoration(color: panel2, borderRadius: BorderRadius.circular(12)),
+  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    Text(label, style: const TextStyle(color: muted, fontSize: 11)),
+    const SizedBox(height: 5),
+    Text(value, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13)),
+  ]),
+);
+
 class MenuRow extends StatelessWidget{final IconData icon;final String title,subtitle;const MenuRow({super.key,required this.icon,required this.title,required this.subtitle});@override Widget build(BuildContext context)=>Container(decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(14)),child:ListTile(leading:const Icon(Icons.info_outline,color:teal),title:Text(title,style:const TextStyle(fontWeight:FontWeight.w700,fontSize:13)),subtitle:Text(subtitle,style:const TextStyle(color:muted,fontSize:11))));}
 String money(double v)=>v==0?'—':'Rp ${v.toStringAsFixed(0)}';
