@@ -64,6 +64,23 @@ class ApiService {
     return rows.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
   }
 
+  // Fundamental BEI: rasio dan key statistics satu emiten.
+  // Endpoint tersedia mulai paket Starter pada API IDX api.co.id.
+  Future<Map<String, dynamic>> keyStats(String symbol) async {
+    final json = await get('/keystats/${Uri.encodeComponent(symbol)}');
+    final root = json['data'];
+    if (root is Map) {
+      final nested = root['data'];
+      if (nested is Map) {
+        final result = Map<String, dynamic>.from(nested);
+        if (root['meta'] is Map) result['meta'] = root['meta'];
+        return result;
+      }
+      return Map<String, dynamic>.from(root);
+    }
+    return <String, dynamic>{};
+  }
+
   Future<List<Map<String, dynamic>>> news() async {
     final json = await get('/news');
     final root = json['data']; final rows = root is Map ? root['data'] : null;
@@ -100,14 +117,15 @@ class StockAnalysis {
   final String symbol, name, signal, reason;
   final double close, changePct, score, rsi, ema20, ema50, ema200, atr, entry, entryLow, entryHigh, tp1, tp2, tp3, sl, rr1, rr2, rr3;
   final double volume, avgVolume20, rvol;
-  final String trendReason, momentumReason, riskReason;
+  final String trendReason, momentumReason, riskReason, antiChaseReason;
+  final bool antiChase;
   final int bars;
   final DateTime? signalDate, validUntil;
   StockAnalysis({required this.symbol, required this.name, required this.signal, required this.reason,
     required this.close, required this.changePct, required this.score, required this.rsi,
     required this.ema20, required this.ema50, required this.ema200, required this.atr,
     required this.volume, required this.avgVolume20, required this.rvol,
-    required this.entry, required this.entryLow, required this.entryHigh, required this.tp1, required this.tp2, required this.tp3, required this.sl, required this.rr1, required this.rr2, required this.rr3, required this.trendReason, required this.momentumReason, required this.riskReason, required this.bars, required this.signalDate, required this.validUntil});
+    required this.entry, required this.entryLow, required this.entryHigh, required this.tp1, required this.tp2, required this.tp3, required this.sl, required this.rr1, required this.rr2, required this.rr3, required this.trendReason, required this.momentumReason, required this.riskReason, required this.antiChase, required this.antiChaseReason, required this.bars, required this.signalDate, required this.validUntil});
 }
 
 String compactNum(double n) {
@@ -165,9 +183,13 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
   final volumeValues = bars.map((e) => numVal(e['volume'] ?? e['vol'])).toList();
   final volume = volumeValues.isNotEmpty ? volumeValues.last : 0.0;
   final recentVolumes = volumeValues.where((v) => v > 0).toList();
-  final avgVolume20 = recentVolumes.length >= 20
-      ? recentVolumes.skip(recentVolumes.length - 20).reduce((a, b) => a + b) / 20
-      : (recentVolumes.isNotEmpty ? recentVolumes.reduce((a, b) => a + b) / recentVolumes.length : 0.0);
+  // Seperti pipeline AS: rata-rata 20 hari tidak memasukkan candle hari ini.
+  final priorVolumes = recentVolumes.length >= 21
+      ? recentVolumes.skip(recentVolumes.length - 21).take(20).toList()
+      : recentVolumes.length > 1 ? recentVolumes.take(recentVolumes.length - 1).toList() : <double>[];
+  final avgVolume20 = priorVolumes.isNotEmpty
+      ? priorVolumes.reduce((a, b) => a + b) / priorVolumes.length
+      : 0.0;
   final rvol = avgVolume20 > 0 && volume > 0 ? volume / avgVolume20 : 0.0;
   final change = numVal(instrument['change_pct']);
   final e20 = ema(closes,20), e50 = ema(closes,50), e200 = ema(closes,200), strength = rsi(closes);
@@ -192,15 +214,9 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
   if (change > 0) score += 10;
   if (bars.length >= 200) score += 15; else if (bars.length >= 50) score += 8;
   final valid = bars.length >= 50 && close > 0 && atr > 0;
-  // Zona entry BEI dijaga dekat harga penutupan: maksimal sekitar 3% di bawah close.
-  // EMA20 dipakai hanya bila masih dekat; jika terlalu jauh, gunakan pullback ATR yang dibatasi.
-  final nearEma20 = valid && e20 > 0 && e20 <= close && (close - e20) <= close * 0.025;
-  final fallbackPullback = valid ? (0.35 * atr).clamp(close * 0.005, close * 0.015).toDouble() : 0.0;
-  final rawCenter = nearEma20 ? e20 : close - fallbackPullback;
-  final entryCenter = valid ? rawCenter.clamp(close * 0.975, close * 0.995).toDouble() : 0.0;
-  final halfWidth = valid ? (0.12 * atr).clamp(close * 0.002, close * 0.005).toDouble() : 0.0;
-  final entryLow = valid ? (entryCenter - halfWidth).clamp(close * 0.97, close * 0.995).toDouble() : 0.0;
-  final entryHigh = valid ? (entryCenter + halfWidth).clamp(entryLow, close * 0.998).toDouble() : 0.0;
+  // Samakan formula zona entry dengan screener saham AS: pullback 0.15–0.50 ATR.
+  final entryLow = valid ? (close - 0.50 * atr).clamp(0.01, close).toDouble() : 0.0;
+  final entryHigh = valid ? (close - 0.15 * atr).clamp(entryLow, close).toDouble() : 0.0;
   final entry = valid ? (entryLow + entryHigh) / 2 : 0.0;
   final sl = valid ? entryLow - (1.2 * atr) : 0.0;
   final risk = valid ? (entry - sl) : 0.0;
@@ -237,23 +253,31 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
   final rr3 = valid && riskDistance > 0
       ? (tp3 - entry) / riskDistance : 0.0;
 
-  final trendValid = valid &&
-      close > e20 &&
-      e20 > e50 &&
-      strength >= 50 &&
-      strength <= 75;
-
+  // Samakan filter anti-chasing dengan screener saham AS.
+  String antiChaseReason = '';
+  if (change >= 15) {
+    antiChaseReason = 'Kenaikan harian >=15%; hindari mengejar harga.';
+  } else if (atr > 0 && e20 > 0 && close > e20 && close - e20 >= 1.5 * atr) {
+    antiChaseReason = 'Harga terlalu jauh dari EMA20 dibanding ATR14; tunggu pullback.';
+  } else if (strength >= 75) {
+    antiChaseReason = 'RSI14 >=75; kondisi jenuh beli, tunggu pendinginan.';
+  }
+  final antiChase = antiChaseReason.isNotEmpty;
+  final setupValid = valid && !antiChase && e20 > e50 && close > e20 &&
+      strength >= 48 && strength <= 68 && rvol >= 0.8;
   final signal = !valid
       ? 'DATA KURANG'
-      : !trendValid
-          ? 'WAIT'
-          : close <= entryHigh * 1.015
-              ? 'AREA ENTRY'
-              : 'MENUNGGU PULLBACK';
+      : antiChase
+          ? 'NO TRADE'
+          : setupValid
+              ? 'BUY SETUP'
+              : (e20 > e50 && close > e20 ? 'WAIT' : 'NO TRADE');
 
   final reason = !valid
       ? 'Riwayat candle harian belum cukup untuk analisis swing yang layak.'
-      : '$trendReason $momentumReason';
+      : antiChase
+          ? antiChaseReason
+          : '$trendReason $momentumReason';
 
   return StockAnalysis(
     symbol: (instrument['symbol'] ?? '').toString(),
@@ -284,6 +308,8 @@ StockAnalysis analyzeDaily(Map<String,dynamic> instrument, List<Map<String,dynam
     trendReason: trendReason,
     momentumReason: momentumReason,
     riskReason: riskReason,
+    antiChase: antiChase,
+    antiChaseReason: antiChaseReason,
     bars: closes.length,
     signalDate: signalDate,
     validUntil: validUntil,
@@ -811,119 +837,293 @@ class InstrumentTile extends StatelessWidget {
   }
 }
 
+
+// Mencari metrik secara toleran terhadap variasi nama field API.
+String _normalKey(String value) => value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+
+dynamic _findFundamentalValue(dynamic node, Set<String> aliases) {
+  if (node is Map) {
+    for (final entry in node.entries) {
+      final key = _normalKey(entry.key.toString());
+      if (aliases.contains(key)) return entry.value;
+    }
+    for (final value in node.values) {
+      final found = _findFundamentalValue(value, aliases);
+      if (found != null) return found;
+    }
+  } else if (node is List) {
+    for (final value in node) {
+      final found = _findFundamentalValue(value, aliases);
+      if (found != null) return found;
+    }
+  }
+  return null;
+}
+
+double? _fundamentalNumber(dynamic value) {
+  if (value is num) return value.toDouble();
+  if (value is Map) {
+    for (final key in ['value', 'current', 'ttm', 'ratio']) {
+      if (value[key] != null) return _fundamentalNumber(value[key]);
+    }
+  }
+  if (value is String) {
+    final cleaned = value.replaceAll(',', '').replaceAll('%', '').trim();
+    return double.tryParse(cleaned);
+  }
+  return null;
+}
+
+String _fundamentalDisplay(dynamic value, {bool percent = false, String suffix = 'x'}) {
+  final number = _fundamentalNumber(value);
+  if (number == null) return 'N/A';
+  return percent ? '${number.toStringAsFixed(2)}%' : '${number.toStringAsFixed(2)}$suffix';
+}
+
+String _fundamentalDate(Map<String, dynamic>? data) {
+  if (data == null) return 'Tanggal data tidak tersedia';
+  dynamic value;
+  final meta = data['meta'];
+  if (meta is Map) value = meta['as_of'] ?? meta['updated_at'] ?? meta['date'];
+  value ??= data['as_of'] ?? data['updated_at'] ?? data['date'];
+  if (value == null) return 'Tanggal data tidak tersedia';
+  final parsed = DateTime.tryParse(value.toString());
+  return parsed == null ? 'Tanggal data: ${value.toString()}' : 'Data per ${parsed.toLocal().toString().split(' ').first}';
+}
+
 class StockDetailPage extends StatefulWidget {
   final Map<String, dynamic> instrument;
   const StockDetailPage({super.key, required this.instrument});
-
   @override
   State<StockDetailPage> createState() => _StockDetailPageState();
 }
 
 class _StockDetailPageState extends State<StockDetailPage> {
   final api = ApiService();
+  static const storage = FlutterSecureStorage();
   bool loading = true;
   String error = '';
   StockAnalysis? analysis;
+  bool entryInvalidated = false;
+  Map<String, dynamic>? fundamental;
+  bool fundamentalLoading = true;
+  String fundamentalError = '';
 
   @override
-  void initState() {
-    super.initState();
-    loadAnalysis();
-  }
+  void initState() { super.initState(); loadAnalysis(); }
 
   Future<void> loadAnalysis() async {
     final symbol = (widget.instrument['symbol'] ?? '').toString().toUpperCase();
     try {
       final bars = await api.daily(symbol);
-      final result = analyzeDaily(widget.instrument, bars);
-      if (mounted) setState(() => analysis = result);
+      final fresh = analyzeDaily(widget.instrument, bars);
+      Map<String, dynamic>? stats;
+      String statsError = '';
+      try {
+        stats = await api.keyStats(symbol);
+        if (stats.isEmpty) statsError = 'Data fundamental belum tersedia dari API.';
+      } catch (e) {
+        statsError = e.toString().replaceFirst('Exception: ', '');
+      }
+      final key = 'entry_protection_$symbol';
+      final raw = await storage.read(key: key);
+      Map<String, dynamic>? saved;
+      if (raw != null && raw.isNotEmpty) {
+        try { saved = Map<String, dynamic>.from(jsonDecode(raw) as Map); } catch (_) { saved = null; }
+      }
+
+      DateTime? savedUntil = saved == null ? null : DateTime.tryParse((saved['valid_until'] ?? '').toString());
+      final today = DateTime.now();
+      final expired = savedUntil != null && today.isAfter(DateTime(savedUntil.year, savedUntil.month, savedUntil.day, 23, 59, 59));
+      if (saved != null && (savedUntil == null || expired)) {
+        await storage.delete(key: key);
+        saved = null;
+      }
+
+      if (saved == null && fresh.signal == 'BUY SETUP' && fresh.validUntil != null) {
+        saved = {
+          'entry_low': fresh.entryLow, 'entry_high': fresh.entryHigh,
+          'stop_loss': fresh.sl, 'tp1': fresh.tp1, 'tp2': fresh.tp2, 'tp3': fresh.tp3,
+          'rr1': fresh.rr1, 'rr2': fresh.rr2, 'rr3': fresh.rr3,
+          'signal_date': fresh.signalDate?.toIso8601String(),
+          'valid_until': fresh.validUntil!.toIso8601String(),
+          'invalidated': false,
+        };
+        await storage.write(key: key, value: jsonEncode(saved));
+      }
+
+      var invalidated = saved?['invalidated'] == true;
+      if (saved != null && !invalidated) {
+        final currentPrice = numVal(widget.instrument['last']) > 0
+            ? numVal(widget.instrument['last']) : fresh.close;
+        final savedLow = numVal(saved['entry_low']);
+        if (savedLow > 0 && currentPrice > 0 && currentPrice < savedLow) {
+          invalidated = true;
+          saved['invalidated'] = true;
+          saved['invalidated_at'] = DateTime.now().toIso8601String();
+          await storage.write(key: key, value: jsonEncode(saved));
+        }
+      }
+
+      StockAnalysis result = fresh;
+      if (saved != null) {
+        final signalDate = DateTime.tryParse((saved['signal_date'] ?? '').toString());
+        result = StockAnalysis(
+          symbol: fresh.symbol, name: fresh.name,
+          signal: invalidated ? 'NO TRADE' : 'BUY SETUP',
+          reason: invalidated ? 'Entry Protection aktif: harga turun di bawah batas bawah zona entry. Sinyal dibatalkan sampai masa berlaku 5 hari bursa berakhir.' : fresh.reason,
+          close: fresh.close, changePct: fresh.changePct, score: fresh.score,
+          rsi: fresh.rsi, ema20: fresh.ema20, ema50: fresh.ema50, ema200: fresh.ema200, atr: fresh.atr,
+          volume: fresh.volume, avgVolume20: fresh.avgVolume20, rvol: fresh.rvol,
+          entry: (numVal(saved['entry_low']) + numVal(saved['entry_high'])) / 2,
+          entryLow: numVal(saved['entry_low']), entryHigh: numVal(saved['entry_high']),
+          tp1: numVal(saved['tp1']), tp2: numVal(saved['tp2']), tp3: numVal(saved['tp3']),
+          sl: numVal(saved['stop_loss']), rr1: numVal(saved['rr1']), rr2: numVal(saved['rr2']), rr3: numVal(saved['rr3']),
+          trendReason: fresh.trendReason, momentumReason: fresh.momentumReason,
+          riskReason: fresh.riskReason, antiChase: fresh.antiChase,
+          antiChaseReason: fresh.antiChaseReason, bars: fresh.bars,
+          signalDate: signalDate ?? fresh.signalDate,
+          validUntil: savedUntil ?? fresh.validUntil,
+        );
+      }
+      if (mounted) setState(() {
+        analysis = result;
+        entryInvalidated = invalidated;
+        fundamental = stats;
+        fundamentalError = statsError;
+        fundamentalLoading = false;
+      });
     } catch (e) {
       if (mounted) setState(() => error = e.toString().replaceFirst('Exception: ', ''));
     } finally {
-      if (mounted) setState(() => loading = false);
+      if (mounted) setState(() {
+        loading = false;
+        if (fundamentalLoading) fundamentalLoading = false;
+      });
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final a = analysis;
     final symbol = (widget.instrument['symbol'] ?? '—').toString();
     final name = (widget.instrument['name'] ?? symbol).toString();
+    final price = numVal(widget.instrument['last']) > 0 ? numVal(widget.instrument['last']) : (a?.close ?? 0);
+    final change = numVal(widget.instrument['change_pct']);
+    final volumeNote = a == null ? 'Memuat data volume…' : a.rvol >= 2
+        ? 'Aktivitas volume sangat tinggi dibanding rata-rata 20 hari.'
+        : a.rvol >= 1.2 ? 'Aktivitas volume di atas rata-rata 20 hari.'
+        : a.rvol > 0 ? 'Aktivitas volume belum menunjukkan lonjakan besar.' : 'Data RVOL belum tersedia.';
+    final expired = a?.validUntil != null && DateTime.now().isAfter(DateTime(a!.validUntil!.year, a.validUntil!.month, a.validUntil!.day, 23, 59, 59));
+    Widget metric(String label, String value) => Expanded(child: _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(label, style: const TextStyle(color: muted, fontSize: 10)), const SizedBox(height: 5),
+      Text(value, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
+    ])));
+
     return Scaffold(
-      appBar: AppBar(title: Text('$symbol • Detail Emiten')),
-      body: ListView(padding: const EdgeInsets.all(18), children: [
+      appBar: AppBar(title: Text('$symbol • Detail Saham BEI')),
+      body: ListView(padding: const EdgeInsets.all(16), children: [
         _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(symbol, style: const TextStyle(fontSize: 25, fontWeight: FontWeight.w900)),
-          const SizedBox(height: 4),
-          Text(name, style: const TextStyle(color: muted)),
-          const SizedBox(height: 14),
-          const Text('Harga terakhir dari daftar instrumen', style: TextStyle(color: muted, fontSize: 11)),
-          const SizedBox(height: 4),
-          Text(money(numVal(widget.instrument['last'])), style: const TextStyle(fontSize: 23, fontWeight: FontWeight.w800)),
-          Text('Perubahan harian: ${numVal(widget.instrument['change_pct']).toStringAsFixed(2)}%', style: const TextStyle(color: Colors.white70)),
+          Text(symbol, style: const TextStyle(color: teal, fontSize: 25, fontWeight: FontWeight.w900)),
+          if (name.isNotEmpty) Text(name, style: const TextStyle(color: muted)),
           const SizedBox(height: 12),
-          Row(children: [
-            Expanded(child: _metricBox('Volume harian', analysis == null ? 'Memuat…' : (analysis!.volume > 0 ? compactNum(analysis!.volume) + ' lembar' : 'Tidak tersedia'))),
-            const SizedBox(width: 8),
-            Expanded(child: _metricBox('Rata-rata volume 20D', analysis == null ? 'Memuat…' : (analysis!.avgVolume20 > 0 ? compactNum(analysis!.avgVolume20) + ' lembar' : 'Tidak tersedia'))),
-          ]),
-          const SizedBox(height: 8),
-          _metricBox('RVOL', analysis == null ? 'Memuat…' : (analysis!.rvol > 0 ? analysis!.rvol.toStringAsFixed(2) + 'x' : 'Tidak tersedia')),
+          Text(money(price), style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900)),
+          Text('${change >= 0 ? '+' : ''}${change.toStringAsFixed(2)}% perubahan harian', style: TextStyle(color: change >= 0 ? green : red, fontWeight: FontWeight.w700)),
         ])),
-        const SizedBox(height: 14),
-        const SectionTitle('Analisis teknikal historis', 'DATA HARIAN'),
+        const SizedBox(height: 10),
+        Row(children: [metric('RVOL', a == null ? 'Memuat…' : '${a.rvol.toStringAsFixed(2)}x'), const SizedBox(width: 8), metric('Volume', a == null ? 'Memuat…' : '${compactNum(a.volume)} lembar')]),
         const SizedBox(height: 8),
+        Row(children: [metric('Rata-rata volume 20D', a == null ? 'Memuat…' : '${compactNum(a.avgVolume20)} lembar'), const SizedBox(width: 8), metric('Perubahan', '${change.toStringAsFixed(2)}%')]),
+        const SizedBox(height: 10),
+        _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Interpretasi volume', style: TextStyle(fontWeight: FontWeight.w800)), const SizedBox(height: 6),
+          Text(volumeNote, style: const TextStyle(color: Colors.white70, height: 1.4)),
+        ])),
+        const SizedBox(height: 10),
+        const SectionTitle('Analisis fundamental', 'BEI • KEY STATS'),
+        _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('VALUASI & PROFITABILITAS', style: TextStyle(color: teal, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 9),
+          if (fundamentalLoading)
+            const Padding(padding: EdgeInsets.all(8), child: Center(child: CircularProgressIndicator()))
+          else if (fundamental == null || fundamental!.isEmpty)
+            Text(fundamentalError.isEmpty ? 'Data fundamental belum tersedia.' : fundamentalError,
+              style: const TextStyle(color: muted, height: 1.4))
+          else ...[
+            Row(children: [
+              metric('PER / P-E TTM', _fundamentalDisplay(_findFundamentalValue(fundamental,
+                {'per', 'pe', 'pe ratio', 'trailing pe', 'pe ttm', 'price to earnings', 'price to earnings ratio', 'price earnings ratio'}.map(_normalKey).toSet()))),
+              const SizedBox(width: 8),
+              metric('PBV / P-B', _fundamentalDisplay(_findFundamentalValue(fundamental,
+                {'pbv', 'pbv ratio', 'pb', 'pb ratio', 'price to book', 'price to book value', 'price to book ratio', 'price book ratio'}.map(_normalKey).toSet()))),
+            ]),
+            const SizedBox(height: 8),
+            Row(children: [
+              metric('EPS', _fundamentalDisplay(_findFundamentalValue(fundamental,
+                {'eps', 'eps ttm', 'earning per share', 'earnings per share'}.map(_normalKey).toSet()), suffix: '')),
+              const SizedBox(width: 8),
+              metric('ROE', _fundamentalDisplay(_findFundamentalValue(fundamental,
+                {'roe', 'return on equity', 'return on average equity'}.map(_normalKey).toSet()), percent: true)),
+            ]),
+            const SizedBox(height: 8),
+            Text(_fundamentalDate(fundamental), style: const TextStyle(color: muted, fontSize: 10)),
+            const Text('PER dan PBV perlu dibandingkan dengan perusahaan sejenis dalam sektor yang sama. Nilai N/A berarti field tidak tersedia dari API, bukan nol.',
+              style: TextStyle(color: Colors.white70, fontSize: 11, height: 1.4)),
+          ],
+        ])),
+        const SizedBox(height: 10),
+        const SectionTitle('Analisis teknikal', 'DATA HARIAN'),
         if (loading) const Center(child: Padding(padding: EdgeInsets.all(24), child: CircularProgressIndicator())),
         if (error.isNotEmpty) InfoBox(error),
-        if (!loading && analysis != null) _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            const Expanded(child: Text('Kesimpulan analisis', style: TextStyle(fontWeight: FontWeight.w800))),
-            Text(analysis!.signal, style: TextStyle(color: analysis!.signal == 'SETUP POTENSIAL' ? green : amber, fontWeight: FontWeight.w900)),
-          ]),
-          const SizedBox(height: 12),
-          Text('Skor teknikal: ${analysis!.score.toStringAsFixed(0)}/100'),
-          Text('RSI 14: ${analysis!.rsi.toStringAsFixed(1)}'),
-          Text('EMA20: ${money(analysis!.ema20)}'),
-          Text('EMA50: ${money(analysis!.ema50)}'),
-          Text('EMA200: ${money(analysis!.ema200)}'),
-          Text('ATR14: ${money(analysis!.atr)}'),
-          if (analysis!.validUntil != null && DateTime.now().isAfter(analysis!.validUntil!))
-            const Text('EXPIRED • Area entry kedaluwarsa. Jangan gunakan level lama; muat ulang data dan analisis.', style: TextStyle(color: red, fontWeight: FontWeight.w900))
-          else if (analysis!.validUntil != null)
-            Text('Berlaku sampai: ${analysis!.validUntil!.day.toString().padLeft(2, '0')}-${analysis!.validUntil!.month.toString().padLeft(2, '0')}-${analysis!.validUntil!.year} (5 hari bursa)', style: const TextStyle(color: green, fontWeight: FontWeight.w700)),
-          if (analysis!.signalDate == null)
-            const Text('Tanggal candle tidak tersedia; masa berlaku belum dapat diverifikasi.', style: TextStyle(color: amber)),
-          if (analysis!.validUntil == null || !DateTime.now().isAfter(analysis!.validUntil!)) ...[
-            Text('Zona entry: ${money(analysis!.entryLow)} – ${money(analysis!.entryHigh)}'),
-            Text('Stop Loss: ${money(analysis!.sl)}'),
-            Text('TP1 / TP2 / TP3: ${money(analysis!.tp1)} / ${money(analysis!.tp2)} / ${money(analysis!.tp3)}'),
-            Text('Risk/Reward: 1:${analysis!.rr1.toStringAsFixed(2)} / 1:${analysis!.rr2.toStringAsFixed(2)} / 1:${analysis!.rr3.toStringAsFixed(2)}'),
-          ],
-          Text('Candle harian: ${analysis!.bars}'),
-          Text('Volume hari terakhir: ${analysis!.volume > 0 ? compactNum(analysis!.volume) + ' lembar' : 'Tidak tersedia'}'),
-          Text('Rata-rata volume 20D: ${analysis!.avgVolume20 > 0 ? compactNum(analysis!.avgVolume20) + ' lembar' : 'Tidak tersedia'}'),
-          Text('RVOL: ${analysis!.rvol > 0 ? analysis!.rvol.toStringAsFixed(2) + 'x' : 'Tidak tersedia'}'),
-          const Divider(color: panel2),
-          Text('ALASAN TREN', style: const TextStyle(color: teal, fontWeight: FontWeight.w800)),
-          Text(analysis!.trendReason, style: const TextStyle(color: Colors.white70, height: 1.5)),
-          const SizedBox(height: 8),
-          Text('ALASAN MOMENTUM', style: const TextStyle(color: teal, fontWeight: FontWeight.w800)),
-          Text(analysis!.momentumReason, style: const TextStyle(color: Colors.white70, height: 1.5)),
-          const SizedBox(height: 8),
-          Text('MONEY MANAGEMENT', style: const TextStyle(color: teal, fontWeight: FontWeight.w800)),
-          Text(analysis!.riskReason, style: const TextStyle(color: Colors.white70, height: 1.5)),
-          const SizedBox(height: 6),
-          const Text('Risiko per transaksi: 1% (batas keras 2%).', style: TextStyle(color: Colors.white70)),
-          const Text('Batas rugi harian: 2%. Maksimal alokasi per posisi: 20%.', style: TextStyle(color: Colors.white70)),
-          const Text('Batas total risiko posisi terbuka: 6%. Maksimal 3 posisi bersamaan.', style: TextStyle(color: Colors.white70)),
-          const Text('Risk/Reward minimum: 1:2. Pertimbangkan break-even setelah TP1 dan trailing stop mengikuti swing low/ATR.', style: TextStyle(color: Colors.white70, height: 1.5)),
-          const Text('Panduan hanya dalam persentase, tanpa nominal modal. Tidak terhubung ke saldo atau order broker; penerapan dilakukan manual.', style: TextStyle(color: muted, height: 1.5)),
-        ])),
-        const SizedBox(height: 12),
-        const InfoBox('Zona entry BEI dihitung dekat penutupan terakhir (dibatasi sekitar 3% di bawah harga) dengan EMA20/ATR14. Berlaku 5 hari kerja dari tanggal candle terakhir; hitungan hari kerja tidak memasukkan libur bursa BEI. Jika expired, level entry/SL/TP disembunyikan dan harus dihitung ulang. Data EOD bukan harga real-time dan bukan jaminan profit.'),
+        if (a != null) ...[
+          _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Rencana Entry Swing (1D)', style: TextStyle(fontWeight: FontWeight.w900, color: teal, fontSize: 15)),
+            const SizedBox(height: 8),
+            Text(expired ? 'EXPIRED • Sinyal kedaluwarsa' : a.signal,
+              style: TextStyle(fontWeight: FontWeight.w900, color: expired || a.signal == 'NO TRADE' ? red : a.signal == 'BUY SETUP' ? green : amber, fontSize: 16)),
+            const SizedBox(height: 8),
+            if (expired) const Text('Jangan gunakan level entry lama. Tunggu data harian terbaru dan hitung ulang rencana.')
+            else if (entryInvalidated) const Text('ENTRY PROTECTION: harga turun di bawah batas bawah zona entry. Sinyal dibatalkan; tidak ada sinyal entry ulang sampai masa 5 hari bursa berakhir.', style: TextStyle(color: red, height: 1.4))
+            else if (a.antiChase) Text('ANTI-CHASING: ${a.antiChaseReason}', style: const TextStyle(color: amber, height: 1.4))
+            else if (a.signal == 'BUY SETUP') ...[
+              Text('Zona entry: ${money(a.entryLow)} – ${money(a.entryHigh)}'),
+              Text('Stop Loss: ${money(a.sl)}'), Text('Take Profit 1: ${money(a.tp1)}'), Text('Take Profit 2: ${money(a.tp2)}'),
+            ] else if (a.signal == 'WAIT') const Text('Tren mulai mendukung, tetapi momentum/volume belum memenuhi syarat entry. Tunggu konfirmasi.')
+            else const Text('Belum ada kombinasi tren, momentum, dan volume yang cukup mendukung. Tidak disarankan memaksakan entry.'),
+            const SizedBox(height: 8),
+            Text('EMA20: ${money(a.ema20)} • EMA50: ${money(a.ema50)} • EMA200: ${money(a.ema200)}'),
+            Text('RSI14: ${a.rsi.toStringAsFixed(1)} • ATR14: ${money(a.atr)}'),
+            Text('Berlaku sampai: ${a.validUntil == null ? '—' : '${a.validUntil!.year}-${a.validUntil!.month.toString().padLeft(2,'0')}-${a.validUntil!.day.toString().padLeft(2,'0')}'} (5 hari bursa)'),
+            Text('Dasar data: ${a.signalDate?.toIso8601String().split('T').first ?? '—'}', style: const TextStyle(color: muted, fontSize: 10)),
+            Text('Jumlah candle harian: ${a.bars}', style: const TextStyle(color: muted, fontSize: 10)),
+          ])),
+          const SizedBox(height: 10),
+          _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('ALASAN MOMENTUM', style: TextStyle(color: teal, fontWeight: FontWeight.w900)), const SizedBox(height: 7),
+            Text(a.trendReason, style: const TextStyle(color: Colors.white70, height: 1.45)),
+            Text('RSI14 ${a.rsi.toStringAsFixed(1)}: ${a.momentumReason}', style: const TextStyle(color: Colors.white70, height: 1.45)),
+            Text('RVOL ${a.rvol.toStringAsFixed(2)}x: ${a.rvol >= 1.5 ? 'volume meningkat kuat' : a.rvol >= 1 ? 'volume di sekitar/di atas rata-rata' : 'volume di bawah rata-rata 20 hari'}.', style: const TextStyle(color: Colors.white70, height: 1.45)),
+            Text('Kesimpulan: ${a.antiChase ? 'filter anti-chasing aktif; hindari mengejar harga' : entryInvalidated ? 'Entry Protection aktif; sinyal dibatalkan sampai masa berlaku habis' : a.signal == 'BUY SETUP' ? 'tren, momentum, dan volume memenuhi filter awal; tetap tunggu harga masuk zona entry' : a.signal == 'WAIT' ? 'sebagian kondisi mendukung, tunggu konfirmasi momentum/volume' : 'kombinasi indikator belum mendukung entry'}.', style: const TextStyle(color: Colors.white70, height: 1.45)),
+          ])),
+          const SizedBox(height: 10),
+          _panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('MONEY MANAGEMENT', style: TextStyle(color: teal, fontWeight: FontWeight.w900)), const SizedBox(height: 7),
+            Text(a.riskReason, style: const TextStyle(color: Colors.white70)),
+            const Text('Risiko per transaksi: 1% (batas keras 2%).'), const Text('Batas rugi harian: 2%.'),
+            const Text('Maksimal alokasi per posisi: 20%.'), const Text('Batas total risiko posisi terbuka: 6%.'),
+            const Text('Maksimal posisi bersamaan: 3.'), const Text('Risk/Reward minimum: 1:2.'),
+            Text('Risk/Reward: TP1 1:${a.rr1.toStringAsFixed(2)} • TP2 1:${a.rr2.toStringAsFixed(2)} • TP3 1:${a.rr3.toStringAsFixed(2)}'),
+            const SizedBox(height: 5),
+            const Text('Panduan persentase, bukan nominal. Tidak terhubung ke saldo atau order broker; penerapan dilakukan manual.', style: TextStyle(color: muted, fontSize: 11, height: 1.4)),
+          ])),
+        ],
+        const SizedBox(height: 8),
+        const InfoBox('Analisis memakai candle harian dari API BEI (OHLCV), bukan harga real-time. Entry Protection menyimpan sinyal di perangkat: jika harga turun di bawah batas bawah entry sebelum transaksi dilakukan, status NO TRADE dipertahankan sampai masa sinyal 5 hari bursa berakhir. Hitungan masa berlaku mengecualikan akhir pekan, tetapi belum memperhitungkan seluruh hari libur BEI. Ini bukan jaminan profit.'),
       ]),
     );
   }
 }
+
 Widget _metricBox(String label, String value) => Container(
   padding: const EdgeInsets.all(12),
   decoration: BoxDecoration(color: panel2, borderRadius: BorderRadius.circular(12)),
