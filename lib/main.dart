@@ -1,4 +1,7 @@
 import 'dart:convert';
+import 'dart:math';
+import 'dart:async';
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -16,7 +19,7 @@ class DayaAiApp extends StatelessWidget {
     title: 'Daya AI Pro', debugShowCheckedModeBanner: false,
     theme: ThemeData(brightness: Brightness.dark, scaffoldBackgroundColor: bg,
       colorScheme: const ColorScheme.dark(primary: teal, surface: panel), useMaterial3: true),
-    home: const MainShell(),
+    home: const LicenseGate(),
   );
 }
 
@@ -348,6 +351,164 @@ class GeminiService {
     final text = body['candidates']?[0]?['content']?['parts']?[0]?['text'];
     if (text == null) throw Exception('Gemini tidak mengembalikan ringkasan.');
     return text.toString();
+  }
+}
+
+
+
+// Remote license control. The public GitHub JSON is a read-only allowlist;
+// write access to the repository is the admin control plane.
+class DeviceLicenseService {
+  static const _storage = FlutterSecureStorage();
+  static const _configUrl =
+      'https://raw.githubusercontent.com/fx-a11y/Daya-AI-Pro/main/license/devices.json';
+  static const _deviceIdKey = 'daya_device_id_v1';
+  static const _lastActiveKey = 'daya_license_last_active_v1';
+  static const _lastCheckKey = 'daya_license_last_check_v1';
+  static const _gracePeriod = Duration(hours: 24);
+
+  Future<String> deviceId() async {
+    final existing = await _storage.read(key: _deviceIdKey);
+    if (existing != null && existing.isNotEmpty) return existing;
+    final random = Random.secure();
+    final id = List<int>.generate(16, (_) => random.nextInt(256))
+        .map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    await _storage.write(key: _deviceIdKey, value: id);
+    return id;
+  }
+
+  Future<DeviceLicenseResult> check() async {
+    final id = await deviceId();
+    try {
+      final response = await http.get(Uri.parse(_configUrl), headers: {
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache',
+      }).timeout(const Duration(seconds: 12));
+      if (response.statusCode != 200) {
+        throw Exception('Konfigurasi lisensi tidak dapat dibaca (HTTP ${response.statusCode}).');
+      }
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map || decoded['maxDevices'] != 5 || decoded['devices'] is! List) {
+        throw Exception('Format konfigurasi lisensi tidak valid.');
+      }
+      final devices = (decoded['devices'] as List).whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e)).toList();
+      if (devices.length > 5) throw Exception('Konfigurasi melebihi batas 5 perangkat.');
+      final ids = devices.map((e) => (e['id'] ?? '').toString()).toList();
+      if (ids.any((e) => e.isEmpty) || ids.toSet().length != ids.length) {
+        throw Exception('Daftar perangkat memiliki ID kosong atau duplikat.');
+      }
+      final matches = devices.where((e) => e['id'].toString() == id).toList();
+      final match = matches.isEmpty ? null : matches.first;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await _storage.write(key: _lastCheckKey, value: now.toString());
+      if (match == null) {
+        await _storage.delete(key: _lastActiveKey);
+        return DeviceLicenseResult(id, DeviceLicenseState.pending,
+            'Perangkat ini belum didaftarkan oleh admin. Tambahkan Device ID ke license/devices.json di GitHub.');
+      }
+      final status = (match['status'] ?? '').toString().toUpperCase();
+      if (status != 'ACTIVE') {
+        await _storage.delete(key: _lastActiveKey);
+        return DeviceLicenseResult(id, DeviceLicenseState.blocked,
+            'Akses perangkat ini telah dinonaktifkan oleh admin.');
+      }
+      await _storage.write(key: _lastActiveKey, value: now.toString());
+      return DeviceLicenseResult(id, DeviceLicenseState.active, 'Lisensi perangkat aktif.');
+    } catch (e) {
+      final lastActive = int.tryParse(await _storage.read(key: _lastActiveKey) ?? '');
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (lastActive != null && now >= lastActive &&
+          now - lastActive <= _gracePeriod.inMilliseconds) {
+        return DeviceLicenseResult(id, DeviceLicenseState.active,
+            'Server lisensi sementara tidak terjangkau. Akses memakai izin terakhir selama masa toleransi offline 24 jam.');
+      }
+      return DeviceLicenseResult(id, DeviceLicenseState.error,
+          '${e.toString().replaceFirst('Exception: ', '')} Sambungkan internet lalu coba lagi.');
+    }
+  }
+}
+
+enum DeviceLicenseState { checking, active, pending, blocked, error }
+
+class DeviceLicenseResult {
+  final String deviceId;
+  final DeviceLicenseState state;
+  final String message;
+  const DeviceLicenseResult(this.deviceId, this.state, this.message);
+}
+
+class LicenseGate extends StatefulWidget {
+  const LicenseGate({super.key});
+  @override State<LicenseGate> createState() => _LicenseGateState();
+}
+
+class _LicenseGateState extends State<LicenseGate> {
+  final service = DeviceLicenseService();
+  DeviceLicenseResult? result;
+  Timer? timer;
+  bool loading = true;
+
+  @override void initState() {
+    super.initState();
+    refresh();
+    timer = Timer.periodic(const Duration(minutes: 5), (_) => refresh());
+  }
+
+  Future<void> refresh() async {
+    if (loading && result != null) return;
+    if (mounted) setState(() => loading = true);
+    final value = await service.check();
+    if (!mounted) return;
+    setState(() { result = value; loading = false; });
+  }
+
+  @override void dispose() { timer?.cancel(); super.dispose(); }
+
+  @override Widget build(BuildContext context) {
+    final r = result;
+    if (r?.state == DeviceLicenseState.active) return const MainShell();
+    final title = r == null || r.state == DeviceLicenseState.checking
+        ? 'Memeriksa lisensi' : r.state == DeviceLicenseState.pending
+        ? 'Perangkat belum terdaftar' : r.state == DeviceLicenseState.blocked
+        ? 'Akses perangkat dinonaktifkan' : 'Lisensi belum dapat diverifikasi';
+    final color = r?.state == DeviceLicenseState.blocked ? red : amber;
+    return Scaffold(
+      body: SafeArea(child: Center(child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24), child: _panel(child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const BrandHeader(), const SizedBox(height: 24),
+            Icon(r?.state == DeviceLicenseState.blocked ? Icons.phonelink_lock : Icons.verified_user_outlined,
+                color: color, size: 42),
+            const SizedBox(height: 12),
+            Text(title, style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w900)),
+            const SizedBox(height: 8),
+            Text(r?.message ?? 'Menghubungkan ke server lisensi Daya AI Pro...',
+                style: const TextStyle(color: Colors.white70, height: 1.5)),
+            const SizedBox(height: 18),
+            const Text('DEVICE ID', style: TextStyle(color: teal, fontWeight: FontWeight.w900, fontSize: 11)),
+            const SizedBox(height: 6),
+            SelectableText(r?.deviceId ?? 'Menyiapkan ID...',
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+            const SizedBox(height: 10),
+            SizedBox(width: double.infinity, child: OutlinedButton.icon(
+              onPressed: r == null ? null : () {
+                Clipboard.setData(ClipboardData(text: r.deviceId));
+                ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Device ID disalin.')));
+              }, icon: const Icon(Icons.copy), label: const Text('Salin Device ID'))),
+            const SizedBox(height: 8),
+            SizedBox(width: double.infinity, child: FilledButton.icon(
+              onPressed: loading ? null : refresh,
+              icon: loading ? const SizedBox(width: 16, height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.refresh),
+              label: Text(loading ? 'Memeriksa...' : 'Periksa kembali lisensi'))),
+            const SizedBox(height: 12),
+            const Text('Admin mengelola maksimal 5 perangkat melalui file license/devices.json di repository GitHub. Setelah Device ID didaftarkan dengan status ACTIVE, tekan Periksa kembali lisensi.',
+                style: TextStyle(color: muted, fontSize: 11, height: 1.5)),
+          ])),
+      ))),
+    );
   }
 }
 
@@ -778,7 +939,7 @@ class _MorePageState extends State<MorePage>{
   const InfoBox('Money Management tanpa modal: panduan risiko 1% per transaksi, batas rugi harian 2%, maksimal 3 posisi. Break-even dapat dipertimbangkan setelah TP1; trailing stop mengikuti swing low/ATR. Ini parameter panduan manual; belum terhubung ke saldo broker atau eksekusi order.'),
   const InfoBox('Keamanan: key disimpan di secure storage perangkat, tetapi key yang dipakai langsung dari APK masih dapat diekstrak oleh pihak yang menguasai perangkat. Untuk aplikasi publik, gunakan backend pribadi.'),
   const InfoBox('Paket Api.co.id Free memiliki batas 500 hit/bulan. Karena setiap emiten membutuhkan request riwayat harian, pemindaian seluruh saham BEI setiap hari belum dapat dilakukan dengan paket ini.'),
-  const SizedBox(height:12),const MenuRow(icon:Icons.info_outline,title:'Tentang Daya AI Pro',subtitle:'Versi 0.4.3 • Swing + Gemini + IDX/US Entry Plan')
+  const SizedBox(height:12),const MenuRow(icon:Icons.info_outline,title:'Tentang Daya AI Pro',subtitle:'Versi 0.6.0 • Swing + Gemini + IDX/US + Device License')
  ]);
 }
 
