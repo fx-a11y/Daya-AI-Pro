@@ -516,10 +516,129 @@ class MainShell extends StatefulWidget { const MainShell({super.key}); @override
 class _MainShellState extends State<MainShell> {
   int selected=0;
   @override Widget build(BuildContext context) => Scaffold(
-    body: SafeArea(child: IndexedStack(index:selected, children: const [DashboardPage(), ScreenerPage(), AnalysisPage(), AlertsPage(), MorePage()])),
+    body: SafeArea(child: IndexedStack(index:selected, children: const [DashboardPage(), ScreenerPage(), BacktestPage(), AnalysisPage(), AlertsPage(), MorePage()])),
     bottomNavigationBar: NavigationBar(selectedIndex:selected, onDestinationSelected:(i)=>setState(()=>selected=i), backgroundColor:const Color(0xFF081824), indicatorColor:teal.withOpacity(.16),
-      destinations: const [NavigationDestination(icon:Icon(Icons.home_outlined),label:'Beranda'),NavigationDestination(icon:Icon(Icons.manage_search),label:'Screener'),NavigationDestination(icon:Icon(Icons.auto_awesome_outlined),label:'Analisis'),NavigationDestination(icon:Icon(Icons.notifications_none),label:'Berita'),NavigationDestination(icon:Icon(Icons.grid_view_rounded),label:'Lainnya')]),
+      destinations: const [NavigationDestination(icon:Icon(Icons.home_outlined),label:'Beranda'),NavigationDestination(icon:Icon(Icons.manage_search),label:'Screener'),NavigationDestination(icon:Icon(Icons.history),label:'Backtest'),NavigationDestination(icon:Icon(Icons.auto_awesome_outlined),label:'Analisis'),NavigationDestination(icon:Icon(Icons.notifications_none),label:'Berita'),NavigationDestination(icon:Icon(Icons.grid_view_rounded),label:'Lainnya')]),
   );
+}
+
+
+// Backtest historis: sinyal dihitung hanya dari candle yang sudah selesai,
+// entry pada OPEN candle berikutnya untuk menghindari look-ahead bias.
+class BacktestTrade {
+  final double entry, exit, pnlPct;
+  final String result;
+  final DateTime? entryDate;
+  BacktestTrade(this.entry,this.exit,this.pnlPct,this.result,this.entryDate);
+}
+class BacktestResult {
+  final List<BacktestTrade> trades;
+  final int wins, losses;
+  final double winRate, avgReturn, totalReturn, profitFactor;
+  BacktestResult(this.trades,this.wins,this.losses,this.winRate,this.avgReturn,this.totalReturn,this.profitFactor);
+}
+
+class BacktestEngine {
+  static double _v(Map<String,dynamic> b, List<String> keys) {
+    for (final k in keys) { final n=numVal(b[k]); if(n>0) return n; }
+    return 0;
+  }
+  static BacktestResult run(List<Map<String,dynamic>> bars) {
+    final clean=bars.map((b)=>{
+      'open':_v(b,['open','o']), 'high':_v(b,['high','h']),
+      'low':_v(b,['low','l']), 'close':_v(b,['close','c']),
+      'date':_barDate(b)
+    }).where((b)=> (b['close'] as double)>0 && (b['high'] as double)>0 && (b['low'] as double)>0).toList();
+    final trades=<BacktestTrade>[];
+    if(clean.length<220) return BacktestResult(trades,0,0,0,0,0,0);
+    for(int i=200;i<clean.length-1;i++) {
+      final closes=clean.take(i+1).map((b)=>b['close'] as double).toList();
+      final c=closes.last, e20=ema(closes,20), e50=ema(closes,50), e200=ema(closes,200), r=rsi(closes);
+      if(!(c>e20 && e20>e50 && e50>e200 && r>=50 && r<=70)) continue;
+      final ranges=<double>[];
+      for(int j=i-13;j<=i;j++) {
+        final h=clean[j]['high'] as double, l=clean[j]['low'] as double;
+        final prev=clean[j-1]['close'] as double;
+        ranges.add(max(h-l,max((h-prev).abs(),(l-prev).abs())).toDouble());
+      }
+      final atr=ranges.reduce((a,b)=>a+b)/ranges.length;
+      if(atr<=0) continue;
+      final entryBar=clean[i+1]; final entry=(entryBar['open'] as double)>0?entryBar['open'] as double:c;
+      final sl=entry-1.5*atr, tp=entry+3*atr;
+      double exit=entry; String outcome='EXPIRED'; int exitIndex=min(i+21,clean.length-1);
+      for(int j=i+1;j<=exitIndex;j++) {
+        final hi=clean[j]['high'] as double, lo=clean[j]['low'] as double;
+        // Jika TP dan SL tersentuh pada candle yang sama, hitung SL lebih dulu (konservatif).
+        if(lo<=sl){exit=sl;outcome='LOSS';exitIndex=j;break;}
+        if(hi>=tp){exit=tp;outcome='WIN';exitIndex=j;break;}
+        if(j==exitIndex){exit=clean[j]['close'] as double;}
+      }
+      final pct=(exit-entry)/entry*100;
+      trades.add(BacktestTrade(entry,exit,pct,outcome,entryBar['date'] as DateTime?));
+      i=exitIndex; // satu posisi aktif pada satu waktu
+    }
+    final wins=trades.where((t)=>t.pnlPct>0).length, losses=trades.where((t)=>t.pnlPct<=0).length;
+    final sum=trades.fold<double>(0,(a,t)=>a+t.pnlPct);
+    final grossWin=trades.where((t)=>t.pnlPct>0).fold<double>(0,(a,t)=>a+t.pnlPct);
+    final grossLoss=trades.where((t)=>t.pnlPct<0).fold<double>(0,(a,t)=>a+t.pnlPct.abs());
+    return BacktestResult(trades,wins,losses,trades.isEmpty?0:wins/trades.length*100,
+      trades.isEmpty?0:sum/trades.length,sum,grossLoss==0?(grossWin>0?999:0):grossWin/grossLoss);
+  }
+}
+
+class BacktestPage extends StatefulWidget { const BacktestPage({super.key}); @override State<BacktestPage> createState()=>_BacktestPageState(); }
+class _BacktestPageState extends State<BacktestPage> {
+  final api=ApiService(); final symbolCtrl=TextEditingController(text:'BBCA');
+  String market='BEI'; bool loading=false; String error=''; BacktestResult? result; int barsCount=0;
+  Future<List<Map<String,dynamic>>> _usHistory(String ticker) async {
+    final encoded=Uri.encodeComponent(ticker.toUpperCase());
+    final uri=Uri.parse('https://query1.finance.yahoo.com/v8/finance/chart/$encoded?range=5y&interval=1d&events=history');
+    final res=await http.get(uri,headers:{'User-Agent':'Mozilla/5.0'}).timeout(const Duration(seconds:35));
+    if(res.statusCode!=200) throw Exception('Data historis AS gagal dimuat (HTTP ${res.statusCode}).');
+    final root=jsonDecode(res.body)['chart'];
+    if(root is! Map || root['result'] is! List || (root['result'] as List).isEmpty) throw Exception('Ticker AS tidak ditemukan atau data historis kosong.');
+    final data=(root['result'] as List).first; final quote=(data['indicators']['quote'] as List).first;
+    final ts=data['timestamp'] as List; final out=<Map<String,dynamic>>[];
+    for(int i=0;i<ts.length;i++) {
+      final o=quote['open'][i], h=quote['high'][i], l=quote['low'][i], c=quote['close'][i];
+      if(o==null||h==null||l==null||c==null) continue;
+      out.add({'date':DateTime.fromMillisecondsSinceEpoch((ts[i] as num).toInt()*1000).toIso8601String(),'open':o,'high':h,'low':l,'close':c});
+    }
+    return out;
+  }
+  Future<void> runBacktest() async {
+    final ticker=symbolCtrl.text.trim().toUpperCase(); if(ticker.isEmpty)return;
+    setState(()=>{loading=true,error='',result=null,barsCount=0});
+    try {
+      final rows=market=='BEI'?await api.daily(ticker):await _usHistory(ticker);
+      final r=BacktestEngine.run(rows);
+      if(mounted)setState(()=>{barsCount=rows.length,result=r,if(rows.length<220) error='Data hanya ${rows.length} candle. Minimal 220 candle diperlukan agar EMA200 dapat diuji.'});
+    } catch(e){if(mounted)setState(()=>error=e.toString().replaceFirst('Exception: ',''));}
+    finally{if(mounted)setState(()=>loading=false);}
+  }
+  @override void dispose(){symbolCtrl.dispose();super.dispose();}
+  @override Widget build(BuildContext context)=>ListView(padding:const EdgeInsets.all(18),children:[
+    const PageTitle(title:'Backtest & Probability',subtitle:'Uji strategi screener pada data historis, bukan prediksi pasti'),const SizedBox(height:14),
+    _panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      const Text('PILIH PASAR',style:TextStyle(color:teal,fontWeight:FontWeight.w900,fontSize:11)),const SizedBox(height:8),
+      SegmentedButton<String>(segments:const [ButtonSegment(value:'BEI',label:Text('BEI')),ButtonSegment(value:'AS',label:Text('Amerika'))],selected:{market},onSelectionChanged:(v)=>setState(()=>market=v.first)),
+      const SizedBox(height:12),TextField(controller:symbolCtrl,textCapitalization:TextCapitalization.characters,decoration:InputDecoration(labelText:market=='BEI'?'Kode saham (contoh BBCA)':'Ticker AS (contoh AAPL)',hintText:market=='BEI'?'BBCA':'AAPL',border:const OutlineInputBorder())),
+      const SizedBox(height:12),SizedBox(width:double.infinity,child:FilledButton.icon(onPressed:loading?null:runBacktest,icon:loading?const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2)):const Icon(Icons.play_arrow),label:Text(loading?'Menjalankan backtest...':'Jalankan backtest 5 tahun'))),
+      const SizedBox(height:8),const Text('Strategi: close > EMA20 > EMA50 > EMA200, RSI 50–70. Entry candle berikutnya; SL 1,5 ATR; TP 3 ATR (target 2R); maksimum 20 candle. Jika TP dan SL tersentuh pada candle yang sama, SL dihitung lebih dulu.',style:TextStyle(color:muted,fontSize:10,height:1.5)),
+    ])),
+    if(error.isNotEmpty) InfoBox(error),
+    if(result!=null)...[
+      const SizedBox(height:12),Text('HASIL • $barsCount CANDLE HARIAN',style:const TextStyle(color:teal,fontWeight:FontWeight.w900,fontSize:11)),
+      if(result!.trades.isEmpty) const InfoBox('Tidak ditemukan sinyal yang memenuhi kriteria pada rentang data ini.'),
+      if(result!.trades.isNotEmpty)...[
+        _panel(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('PROBABILITAS HISTORIS MENANG',style:TextStyle(color:muted,fontSize:10)),const SizedBox(height:5),Text('${result!.winRate.toStringAsFixed(1)}%',style:const TextStyle(fontSize:34,fontWeight:FontWeight.w900,color:teal)),Text('${result!.wins} menang • ${result!.losses} kalah • ${result!.trades.length} transaksi',style:const TextStyle(color:muted,fontSize:11))])),
+        const SizedBox(height:8),Row(children:[_statBox('Rata-rata return','${result!.avgReturn.toStringAsFixed(2)}%'),const SizedBox(width:8),_statBox('Total return','${result!.totalReturn.toStringAsFixed(2)}%'),const SizedBox(width:8),_statBox('Profit factor',result!.profitFactor>=999?'∞':result!.profitFactor.toStringAsFixed(2))]),
+        const SizedBox(height:10),const Text('RIWAYAT SIMULASI',style:TextStyle(color:teal,fontWeight:FontWeight.w900,fontSize:11)),
+        ...result!.trades.reversed.take(30).map((t)=>_panel(child:Row(children:[Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(t.entryDate==null?'Tanggal tidak tersedia':t.entryDate!.toIso8601String().substring(0,10),style:const TextStyle(fontWeight:FontWeight.w800)),Text('Entry ${t.entry.toStringAsFixed(2)} → Exit ${t.exit.toStringAsFixed(2)}',style:const TextStyle(color:muted,fontSize:10))])),Text('${t.pnlPct>=0?'+':''}${t.pnlPct.toStringAsFixed(2)}%',style:TextStyle(color:t.pnlPct>0?green:red,fontWeight:FontWeight.w900))]))),
+      ],
+      const InfoBox('Win rate adalah frekuensi hasil positif pada simulasi historis untuk ticker dan aturan ini. Bukan peluang pasti transaksi berikutnya. Belum memasukkan fee, pajak, slippage, suspensi, corporate action, dan survivorship bias; hasil tidak boleh dianggap sebagai jaminan profit.'),
+    ],
+  ]);
 }
 
 class DashboardPage extends StatefulWidget { const DashboardPage({super.key}); @override State<DashboardPage> createState()=>_DashboardPageState(); }
