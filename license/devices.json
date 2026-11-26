@@ -3,7 +3,7 @@
   "maxDevices": 5,
   "devices": [
     {
-      "deviceId": "6eef0349107f67633b3346a6689e9989",
+      "id": "6eef0349107f67633b3346a6689e9989",
       "status": "ACTIVE"
     }
   ]
