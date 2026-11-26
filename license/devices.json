@@ -1,5 +1,10 @@
 {
   "schemaVersion": 1,
   "maxDevices": 5,
-  "devices": []
+  "devices": [
+    {
+      "deviceId": "6eef0349107f67633b3346a6689e9989",
+      "status": "ACTIVE"
+    }
+  ]
 }
